@@ -29,13 +29,20 @@ using Microsoft.Win32;
 static class Program
 {
     public const string Version = "1.1.1";
+    // --demo: made-up feeds and headlines, nothing fetched, read from or saved to this PC.
+    // "--theme Name" picks its theme (for screenshots).
+    public static bool Demo;
+    public static string DemoTheme;
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
 
     [STAThread]
     static void Main(string[] args)
     {
+        Demo = args.Contains("--demo");
+        int ti = Array.IndexOf(args, "--theme");
+        if (ti >= 0 && ti + 1 < args.Length) DemoTheme = args[ti + 1];
         bool created;
-        using (new Mutex(true, @"Local\KinetikFeeds", out created))
+        using (new Mutex(true, Demo ? @"Local\KinetikFeedsDemo" : @"Local\KinetikFeeds", out created))
         {
             if (!created) return; // already running
             SetProcessDPIAware();
@@ -44,10 +51,10 @@ static class Program
             Application.SetCompatibleTextRenderingDefault(false);
             ToolStripManager.Renderer = new DarkMenu();
             Backup.KeyName = "KinetikFeeds"; Backup.AppTitle = "Kinetik Feeds";
-            Backup.OfferRestore();
+            if (!Demo) Backup.OfferRestore();
             Application.Run(new FeedsForm(args.Contains("--settings")));
         }
-        Backup.AfterExit();
+        if (!Demo) Backup.AfterExit();
     }
 }
 
@@ -119,6 +126,7 @@ class Settings
     // restored into it or another program has it busy.
     public static Settings Load()
     {
+        if (Program.Demo) return DemoData.Settings();
         Settings s = null;
         for (int attempt = 0; attempt < 4; attempt++)
         {
@@ -164,7 +172,7 @@ class Settings
 
     public void Save()
     {
-        if (Unreadable) return; // never save defaults over settings that couldn't be read
+        if (Program.Demo || Unreadable) return; // never save defaults over settings that couldn't be read
         try
         {
             using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
@@ -215,6 +223,7 @@ static class ReadList
 
     public static void Load()
     {
+        if (Program.Demo) { Add(DemoData.ReadLinks); return; }
         try { foreach (var l in System.IO.File.ReadAllLines(File)) if (l != "" && set.Add(l)) order.Add(l); } catch { }
     }
 
@@ -224,12 +233,14 @@ static class ReadList
     {
         foreach (var l in links) if (l != null && set.Add(l)) order.Add(l);
         while (order.Count > 3000) { set.Remove(order[0]); order.RemoveAt(0); }
+        if (Program.Demo) return;
         try { Directory.CreateDirectory(Dir); System.IO.File.WriteAllLines(File, order); } catch { }
     }
 
     public static void Clear()
     {
         set.Clear(); order.Clear();
+        if (Program.Demo) return;
         try { System.IO.File.Delete(File); } catch { }
     }
 }
@@ -455,6 +466,42 @@ class DarkMenu : ToolStripProfessionalRenderer
 
 
 // ======================================================================= Fetching and parsing
+// ======================================================================= Demo
+// Made-up feeds for --demo, so the widget can be shown (and screenshotted) without fetching or showing anything real.
+static class DemoData
+{
+    public static Settings Settings()
+    {
+        return new Settings
+        {
+            Layer = 2, ThemeName = Program.DemoTheme ?? "Midnight", MaxItems = 12, X = 240, Y = 160,
+            Feeds = "World Desk\tdemo:world\nGadget Weekly\tdemo:tech\nField Notes\tdemo:science\nThe Pitch\tdemo:sport"
+        };
+    }
+
+    // minutes ago, title
+    static readonly Dictionary<string, object[]> Items = new Dictionary<string, object[]>
+    {
+        { "demo:world", new object[] { 12, "Coastal towns prepare for the biggest king tides in a decade", 95, "Rail link between the two capitals opens two years early", 260, "Parliament passes right-to-repair law for phones and laptops", 600, "Record turnout as voters choose a new city council" } },
+        { "demo:tech", new object[] { 25, "Hands-on: the folding e-reader that fits in a jacket pocket", 140, "Why every new laptop this year has a bigger battery", 330, "Open-source maps project passes 10 million contributors", 720, "The best mechanical keyboards under $100" } },
+        { "demo:science", new object[] { 48, "Astronomers spot water vapour around a nearby rocky planet", 190, "Coral reef restored in record time with 3D-printed tiles", 480, "How octopuses taste with their arms" } },
+        { "demo:sport", new object[] { 70, "Late equaliser keeps the title race open", 230, "Teenager breaks the national 1500 m record", 900, "Season preview: five players to watch" } },
+    };
+
+    public static List<Story> Stories(string url, int src)
+    {
+        var list = new List<Story>();
+        object[] a;
+        if (!Items.TryGetValue(url, out a)) return list;
+        for (int i = 0; i + 1 < a.Length; i += 2)
+            list.Add(new Story { Title = (string)a[i + 1], Link = "https://example.com/" + url.Substring(5) + "/" + i, When = DateTime.UtcNow.AddMinutes(-(int)a[i]), Src = src });
+        return list;
+    }
+
+    // a few already opened, so the dimming of read headlines shows
+    public static readonly string[] ReadLinks = { "https://example.com/world/4", "https://example.com/tech/6" };
+}
+
 class Story
 {
     public string Title, Link;
@@ -558,6 +605,7 @@ static class Rss
     public static List<Story> Fetch(string url, int src, out string title, out string feedUrl)
     {
         feedUrl = url;
+        if (url.StartsWith("demo:")) { title = null; return DemoData.Stories(url, src); }
         string body = Get(url);
         if (Regex.IsMatch(body.Substring(0, Math.Min(body.Length, 2000)), @"<html", RegexOptions.IgnoreCase))
         {
@@ -1196,7 +1244,7 @@ class FeedsForm : Form
         try { AppIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { AppIcon = SystemIcons.Application; }
         menu.Opening += (s, e) => BuildMenu();
         tray.Icon = AppIcon;
-        tray.Text = "Kinetik Feeds";
+        tray.Text = Program.Demo ? "Kinetik Feeds (demo)" : "Kinetik Feeds";
         Backup.BeforeExit = () => tray.Visible = false;
         tray.ContextMenuStrip = menu;
         tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) OpenSettings(null); };
