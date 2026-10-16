@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Feeds")]
 [assembly: AssemblyProduct("Kinetik Feeds")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.3.0")]
+[assembly: AssemblyVersion("1.1.4.0")]
 
 static class Program
 {
-    public const string Version = "1.1.3";
+    public const string Version = "1.1.4";
     // --demo: made-up feeds and headlines, nothing fetched, read from or saved to this PC.
     // "--theme Name" picks its theme (for screenshots).
     public static bool Demo;
@@ -2386,6 +2386,7 @@ class FeedDialog : Form
     // Fetches the link on a background thread. With thenAccept, closes the dialog once it works.
     void Check(bool thenAccept)
     {
+        var requestedText = url.Text.Trim();
         var link = Normalise(url.Text);
         if (link == "") { result.ForeColor = UI.Warn; result.Text = "Paste a link first."; url.Focus(); return; }
         Uri tmp;
@@ -2412,10 +2413,17 @@ class FeedDialog : Form
                 BeginInvoke((Action)(() =>
                 {
                     check.Enabled = ok.Enabled = true;
+                    if (IsDisposed) return;
+                    if (url.Text.Trim() != requestedText)
+                    {
+                        checkedUrl = null; foundUrl = null;
+                        result.ForeColor = UI.Sub; result.Text = "The link changed. Check it again before saving.";
+                        return;
+                    }
                     result.Text = msg;
                     result.ForeColor = good ? UI.Good : UI.Warn;
                     if (!good) return;
-                    checkedUrl = url.Text.Trim(); foundUrl = feedUrl;
+                    checkedUrl = requestedText; foundUrl = feedUrl;
                     if (!nameTyped && !string.IsNullOrEmpty(title)) name.Text = title.Length > 32 ? title.Substring(0, 32).Trim() : title;
                     if (thenAccept) Accept();
                 }));
