@@ -44,3 +44,7 @@ No SDK needed: `build.bat` compiles `KinetikFeeds.cs` with the .NET Framework co
 ## License
 
 [GPL-3.0-or-later](LICENSE). Copyright © 2026 Akila Sella Hennedige.
+
+## Local maintenance build 1.1.3
+
+Includes the approved 16 October 2026 diagnostics fixes. Cross-compilation and regression results are recorded in the Apps diagnostics report; Windows GUI and hardware validation remains pending. Run `python tests/run-tests.py` for non-GUI regressions, and `build.bat package` to compile and create a hash-verified release package. Shared support is compiled into the EXE; no additional runtime DLL is required.

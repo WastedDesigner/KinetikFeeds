@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Feeds")]
 [assembly: AssemblyProduct("Kinetik Feeds")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
 
 static class Program
 {
-    public const string Version = "1.1.2";
+    public const string Version = "1.1.3";
     // --demo: made-up feeds and headlines, nothing fetched, read from or saved to this PC.
     // "--theme Name" picks its theme (for screenshots).
     public static bool Demo;
@@ -52,7 +52,9 @@ static class Program
             ToolStripManager.Renderer = new DarkMenu();
             Backup.KeyName = "KinetikFeeds"; Backup.AppTitle = "Kinetik Feeds";
             if (!Demo) Backup.OfferRestore();
-            Application.Run(new FeedsForm(args.Contains("--settings")));
+            var app = new FeedsForm(args.Contains("--settings"));
+            using (new KinetikSuite.Shutdown("KinetikFeeds" + (Demo ? "Demo" : ""), () => { app.Shutdown(); Application.Exit(); }))
+                Application.Run(app);
         }
         if (!Demo) Backup.AfterExit();
     }
@@ -162,17 +164,19 @@ class Settings
                             else if (f.FieldType == typeof(int)) f.SetValue(s, Convert.ToInt32(v));
                             else f.SetValue(s, Convert.ToInt32(v) != 0);
                         }
-                        catch { }
+                        catch { ok = false; }
                     }
         }
         catch { ok = false; }
         s.RefreshMin = Math.Max(5, s.RefreshMin);
-        return s;
+        KinetikSuite.SettingsValidation.Sanitize(s); return s;
     }
 
     public void Save()
     {
-        if (Program.Demo || Unreadable) return; // never save defaults over settings that couldn't be read
+        if (Program.Demo || Unreadable) return;
+        KinetikSuite.SettingsValidation.Sanitize(this);
+        if (KinetikSuite.RegistryFiles.CannotSave) return; // never save defaults over settings that couldn't be read
         try
         {
             using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
@@ -517,15 +521,10 @@ static class Rss
         Color.FromArgb(180, 135, 255), Color.FromArgb(120, 205, 120), Color.FromArgb(255, 120, 190), Color.FromArgb(240, 210, 80),
     };
 
-    static string Get(string url)
+    static string Get(string url, CancellationToken cancel)
     {
-        using (var wc = new WebClient())
-        {
-            wc.Headers[HttpRequestHeader.UserAgent] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) KinetikFeeds/" + Program.Version;
-            wc.Headers[HttpRequestHeader.Accept] = "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.5";
-            wc.Encoding = System.Text.Encoding.UTF8;
-            return wc.DownloadString(url);
-        }
+        return KinetikSuite.Http.Text(url, 4 << 20, "KinetikFeeds/" + Program.Version, cancel, 20000,
+            "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.8");
     }
 
     static string Child(XmlNode n, params string[] names)
@@ -603,17 +602,20 @@ static class Rss
 
     // Fetches a feed. If the link is a web page rather than a feed, finds the feed it advertises.
     public static List<Story> Fetch(string url, int src, out string title, out string feedUrl)
+    { return Fetch(url, src, out title, out feedUrl, CancellationToken.None); }
+
+    public static List<Story> Fetch(string url, int src, out string title, out string feedUrl, CancellationToken cancel)
     {
         feedUrl = url;
         if (url.StartsWith("demo:")) { title = null; return DemoData.Stories(url, src); }
-        string body = Get(url);
+        string body = Get(url, cancel);
         if (Regex.IsMatch(body.Substring(0, Math.Min(body.Length, 2000)), @"<html", RegexOptions.IgnoreCase))
         {
             var m = Regex.Match(body, @"<link[^>]+type=[""']application/(rss|atom)\+xml[""'][^>]*>", RegexOptions.IgnoreCase);
             var h = m.Success ? Regex.Match(m.Value, @"href=[""']([^""']+)[""']", RegexOptions.IgnoreCase) : Match.Empty;
             if (!h.Success) throw new Exception("No feed found on that page");
             feedUrl = new Uri(new Uri(url), WebUtility.HtmlDecode(h.Groups[1].Value)).ToString();
-            body = Get(feedUrl);
+            body = Get(feedUrl, cancel);
         }
         return Parse(body, src, out title);
     }
@@ -1218,13 +1220,14 @@ class FeedsForm : Form
     readonly System.Windows.Forms.Timer refresh = new System.Windows.Forms.Timer(), minute = new System.Windows.Forms.Timer { Interval = 60000 };
     readonly System.Windows.Forms.Timer spin = new System.Windows.Forms.Timer { Interval = 40 }; // turns the refresh spinner
     readonly NotifyIcon tray = new NotifyIcon();
-    readonly ContextMenuStrip menu = new ContextMenuStrip();
+    readonly ContextMenuStrip menu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
     public Icon AppIcon;
     List<Story> stories = new List<Story>();
     public readonly Dictionary<int, string> Errors = new Dictionary<int, string>();
     public readonly Dictionary<int, int> Counts = new Dictionary<int, int>();
     public DateTime FetchedAt = DateTime.MinValue;
     public volatile bool Busy;
+    CancellationTokenSource request;
     int layer, hover = -1;
     float scroll;
     Frame last = new Frame();
@@ -1253,8 +1256,13 @@ class FeedsForm : Form
         spin.Tick += (s, e) => { if (Busy) Render(); else spin.Stop(); };
         minute.Tick += (s, e) => Render(); // keeps "5m ago" current
         minute.Start();
-        SystemEvents.PowerModeChanged += (s, e) => { if (e.Mode == PowerModes.Resume) try { BeginInvoke((Action)FetchAll); } catch { } };
+        SystemEvents.PowerModeChanged += OnPower;
     }
+
+    void OnPower(object sender, PowerModeChangedEventArgs e) { if (e.Mode == PowerModes.Resume) try { BeginInvoke((Action)FetchAll); } catch { } }
+
+    public void Shutdown()
+    { if (settings != null && !settings.IsDisposed) settings.Close(); c.Save(); Close(); }
 
     protected override CreateParams CreateParams
     {
@@ -1297,7 +1305,7 @@ class FeedsForm : Form
     protected override void Dispose(bool disposing)
     {
         surface.Dispose();
-        if (disposing) { spin.Dispose(); refresh.Dispose(); minute.Dispose(); tray.Dispose(); menu.Dispose(); shadow.Dispose(); }
+        if (disposing) { generation++; if (request != null) { request.Cancel(); request = null; } SystemEvents.PowerModeChanged -= OnPower; spin.Dispose(); refresh.Dispose(); minute.Dispose(); tray.Dispose(); menu.Dispose(); shadow.Dispose(); }
         base.Dispose(disposing);
     }
 
@@ -1348,51 +1356,53 @@ class FeedsForm : Form
     void FetchAll(bool force)
     {
         if (Busy && !force) return;
-        Busy = true;
-        int gen = ++generation;
-        refresh.Stop();
-        if (c.ShowHeader) spin.Start();
-        Render();
-        var sources = c.List;
-        new Thread(() =>
+        if (request != null) request.Cancel();
+        var cancel = new CancellationTokenSource(); request = cancel;
+        cancel.CancelAfter(20000); var token = cancel.Token;
+        Busy = true; int gen = ++generation;
+        refresh.Stop(); if (c.ShowHeader) spin.Start(); Render();
+        var sources = c.List.Select(source => new Source { Name = source.Name, Url = source.Url, On = source.On, Color = source.Color }).ToList();
+        ThreadPool.QueueUserWorkItem(_ =>
         {
-            var all = new List<Story>();
-            var errs = new Dictionary<int, string>();
-            var counts = new Dictionary<int, int>();
-            var threads = sources.Select((s, i) => new Thread(() =>
-            {
-                if (!s.On) return;
-                try
-                {
-                    string t, f;
-                    var got = Rss.Fetch(s.Url, i, out t, out f);
-                    lock (all) { all.AddRange(got.Take(60)); counts[i] = got.Count; }
-                }
-                catch (Exception ex) { lock (errs) errs[i] = Friendly(ex); }
-            }) { IsBackground = true }).ToList();
-            threads.ForEach(t => t.Start());
-            threads.ForEach(t => t.Join(20000));
-            List<Story> merged;
-            lock (all) merged = all.GroupBy(s => s.Link ?? s.Title).Select(g => g.First()).OrderByDescending(s => s.When).ToList();
+            var all = new List<Story>(); var errs = new Dictionary<int, string>(); var counts = new Dictionary<int, int>(); var gate = new object();
             try
             {
-                BeginInvoke((Action)(() =>
+                System.Threading.Tasks.Parallel.For(0, sources.Count,
+                    new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token }, i =>
                 {
-                    if (gen != generation) return; // the feed list changed while this was running
-                    Errors.Clear(); Counts.Clear();
-                    lock (errs) foreach (var kv in errs) Errors[kv.Key] = kv.Value;
-                    lock (all) foreach (var kv in counts) Counts[kv.Key] = kv.Value;
-                    if (merged.Count > 0 || errs.Count > 0 || sources.All(s => !s.On)) stories = merged;
-                    FetchedAt = DateTime.Now;
-                    Busy = false;
-                    refresh.Interval = c.RefreshMin * 60000;
-                    refresh.Start();
-                    Render();
-                    if (settings != null && !settings.IsDisposed) settings.FetchFinished();
-                }));
+                    var source = sources[i]; if (!source.On) return;
+                    try
+                    {
+                        string title, url;
+                        var got = Rss.Fetch(source.Url, i, out title, out url, token);
+                        lock (gate) { all.AddRange(got.Take(60)); counts[i] = got.Count; }
+                    }
+                    catch (Exception ex) { lock (gate) errs[i] = token.IsCancellationRequested ? "Refresh timed out" : Friendly(ex); }
+                });
             }
-            catch { Busy = false; }
-        }) { IsBackground = true }.Start();
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { lock (gate) errs[-1] = Friendly(ex); }
+            for (int i = 0; i < sources.Count; i++) if (sources[i].On && !counts.ContainsKey(i) && !errs.ContainsKey(i)) errs[i] = "Refresh timed out";
+            var merged = all.GroupBy(story => story.Link ?? story.Title).Select(group => group.First()).OrderByDescending(story => story.When).ToList();
+            try { BeginInvoke((Action)(() =>
+            {
+                try
+                {
+                    if (gen != generation || IsDisposed) return;
+                    request = null; Errors.Clear(); Counts.Clear();
+                    foreach (var pair in errs) Errors[pair.Key] = pair.Value;
+                    foreach (var pair in counts) Counts[pair.Key] = pair.Value;
+                    // Retain an already displayed feed when that source is offline.
+                    stories = merged.Concat(stories.Where(story => errs.ContainsKey(story.Src)))
+                        .GroupBy(story => story.Link ?? story.Title).Select(group => group.First()).OrderByDescending(story => story.When).ToList();
+                    FetchedAt = DateTime.Now; Busy = false; spin.Stop();
+                    ShareHeadlines();
+                    refresh.Interval = c.RefreshMin * 60000; refresh.Start(); Render();
+                    if (settings != null && !settings.IsDisposed) settings.FetchFinished();
+                }
+                finally { cancel.Dispose(); }
+            })); } catch { cancel.Dispose(); }
+        });
     }
     int generation;
 
@@ -1412,6 +1422,30 @@ class FeedsForm : Form
         if (ex is XmlException) return "That link isn't an RSS or Atom feed";
         return ex.Message;
     }
+
+    // The headlines on show, for Kinetik Screen's Feeds page: %LOCALAPPDATA%\KinetikFeeds\headlines.tsv, one per line as
+    // UTC ticks (0 = no date), feed name, title and link, tab-separated. Written to a temporary file first, then swapped in.
+    void ShareHeadlines()
+    {
+        if (Program.Demo) return;
+        try
+        {
+            var sources = c.List;
+            var sb = new System.Text.StringBuilder();
+            foreach (var st in ShownStories())
+            {
+                string name = st.Src < sources.Count ? sources[st.Src].Name : "";
+                sb.Append(st.When == DateTime.MinValue ? 0 : st.When.Ticks).Append('\t').Append(Tsv(name)).Append('\t').Append(Tsv(st.Title)).Append('\t').Append(Tsv(st.Link)).Append("\r\n");
+            }
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KinetikFeeds");
+            Directory.CreateDirectory(dir);
+            var file = Path.Combine(dir, "headlines.tsv"); var tmp = file + ".tmp";
+            File.WriteAllText(tmp, sb.ToString(), new System.Text.UTF8Encoding(false));
+            if (File.Exists(file)) File.Replace(tmp, file, null); else File.Move(tmp, file);
+        }
+        catch { }
+    }
+    static string Tsv(string v) { return (v ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' '); }
 
     public List<Story> ShownStories()
     {
@@ -2435,22 +2469,8 @@ static class Backup
         }
     }
 
-    static bool Reg(string args)
-    {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "reg.exe"), args)
-            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            using (var p = System.Diagnostics.Process.Start(psi))
-            {
-                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
-                return p.WaitForExit(15000) && p.ExitCode == 0;
-            }
-        }
-        catch { return false; }
-    }
+    static bool Reg(string args) { return KinetikSuite.RegistryFiles.Run(args); }
 
-    // A restore may only write this app's own key, so an edited or swapped file can't change anything else.
     static bool FileIsOurs()
     {
         try
@@ -2469,7 +2489,11 @@ static class Backup
         catch { return false; }
     }
 
-    static bool Import() { return FileIsOurs() && Reg("import \"" + FilePath + "\""); }
+    static bool Import()
+    {
+        try { return FileIsOurs() && KinetikSuite.RegistryFiles.Replace(FilePath, new[] { KeyName }); }
+        catch (Exception ex) { Say(ex.Message, MessageBoxIcon.Warning); return false; }
+    }
 
     static void Say(string text, MessageBoxIcon icon) { MessageBox.Show(text, AppTitle, MessageBoxButtons.OK, icon); }
 
