@@ -2284,7 +2284,7 @@ class SettingsForm : Form
     // ---- About
     void BuildAbout()
     {
-        Desc("An RSS and Atom headlines widget, in the style of Kinetik.");
+        Desc("An RSS and Atom headlines widget, one of the Kinetik apps.");
         Row("info", "Kinetik Feeds " + Program.Version, "Copyright © 2026 Akila Sella Hennedige. GPL-3.0-or-later.", null);
         long mem = 0;
         try { using (var pr = Process.GetCurrentProcess()) mem = pr.WorkingSet64; } catch { }

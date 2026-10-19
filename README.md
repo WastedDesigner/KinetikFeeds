@@ -20,7 +20,7 @@ It's a small portable app with no installer. It's a companion to [Kinetik](https
 - **Any RSS or Atom feed**, each switchable on or off (starts with BBC News, The Verge and Hacker News)
 - **One list of headlines** across your feeds, newest first; click one to open it in your browser
 - **Updating** on a schedule you choose, with a limit on how many headlines and how old they can be
-- **Themes** in Kinetik's style, custom accent, fonts, width, scale, opacity, rounding, shadow and border
+- **Themes** in the Kinetik apps' style, custom accent, fonts, width, scale, opacity, rounding, shadow and border
 - **Placement:** drag anywhere, snap to edges, lock position, run at startup
 - **Settings backup** next to the exe, offered again on a fresh Windows
 
