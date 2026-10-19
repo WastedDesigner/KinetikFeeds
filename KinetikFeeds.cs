@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Feeds")]
 [assembly: AssemblyProduct("Kinetik Feeds")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
 
 static class Program
 {
-    public const string Version = "1.2.0";
+    public const string Version = "2.0.0";
     // --demo: made-up feeds and headlines, nothing fetched, read from or saved to this PC.
     // "--theme Name" picks its theme (for screenshots).
     public static bool Demo;

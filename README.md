@@ -6,7 +6,7 @@
 
 **Kinetik Feeds** is a free, open-source **RSS and Atom news widget for Windows 11 and Windows 10**. It puts the latest headlines from the sites you follow on your desktop. Feeds are fetched straight from their public links: no account, no API keys.
 
-It's a small portable app with no installer. It's a companion to [Kinetik](https://github.com/WastedDesigner/Kinetik), the taskbar system monitor, and [Kinetik Calendar](https://github.com/WastedDesigner/KinetikCalendar), and shares their look.
+It's a small portable app with no installer. It's a companion to [Kinetik Stats](https://github.com/WastedDesigner/Kinetik), the taskbar system monitor, and [Kinetik Calendar](https://github.com/WastedDesigner/KinetikCalendar), and shares their look.
 
 <p>
   <img src="screenshots/widget.png" alt="Kinetik Feeds in the Midnight theme, with headlines from four feeds" width="400">
@@ -14,6 +14,17 @@ It's a small portable app with no installer. It's a companion to [Kinetik](https
 </p>
 
 > **About this project:** I made this for my own desktop and decided to share it in case anyone else finds it useful. If you run into a bug or have an idea for a feature, please [open an issue](../../issues).
+
+## What's new in 2.0
+
+Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner/Kinetik) (the taskbar monitor, called just Kinetik until its v4.0), [Kinetik Hub](https://github.com/WastedDesigner/KinetikHub) and the other desktop widgets.
+
+- **Settings in Kinetik Stats' layout:** rows join into cards with thin dividers, small-caps headings, and drop-downs, switches and buttons in the app theme.
+- **App theme:** one theme and accent colour for every Kinetik app's windows and menus: Match Windows, Graphite, OLED black, Midnight, Nord, Mocha, Forest, Light or Paper, with a Sky, Violet, Mint, Amber, Rose or Coral accent or your Windows accent. Pick it in Settings → General, under **App theme** in the right-click menu, in Kinetik Hub or in Kinetik Stats, and every app follows.
+- **Widget themes:** new **OLED black** and **Mocha**, and **Match app theme**, which uses the app theme and accent colour.
+- **New icon** in the Kinetik apps' "Graphite glass" style.
+
+<img src="screenshots/settings.png" alt="Kinetik Feeds' settings" width="600">
 
 ## Features
 
