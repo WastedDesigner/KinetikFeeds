@@ -30,6 +30,7 @@ Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner
 
 - **Any RSS or Atom feed**, each switchable on or off (starts with BBC News, The Verge and Hacker News)
 - **One list of headlines** across your feeds, newest first; click one to open it in your browser
+- **Compact news cards** with source badges, timestamps, subtle dividers and an updated-time header. The two newest stories per feed can show a thumbnail when an image is supplied; narrow widgets keep the full width for text.
 - **Updating** on a schedule you choose, with a limit on how many headlines and how old they can be
 - **Themes** in the Kinetik apps' style, custom accent, fonts, width, scale, opacity, rounding, shadow and border
 - **Placement:** drag anywhere, snap to edges, lock position, run at startup
@@ -40,7 +41,7 @@ Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner
 1. Download `KinetikFeeds.zip` from [Releases](../../releases/latest) and extract it anywhere.
 2. Run `KinetikFeeds.exe`. Right-click the widget or the tray icon for Settings, where you add and remove feeds.
 
-Settings are kept in `HKCU\Software\KinetikFeeds`. The only network requests are to the feed links you add.
+Settings are kept in `HKCU\Software\KinetikFeeds`. Network requests go to the feed links you add and the story images those feeds supply. Images have size and time limits; an unavailable image leaves the headline readable.
 
 ## Requirements
 
@@ -55,6 +56,8 @@ No SDK needed: `build.bat` compiles `KinetikFeeds.cs` with the .NET Framework co
 ## Tests and packaging
 
 `python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+
+For the feed image and layout checks on Windows, compile `tests\FeedsLayoutTests.cs` alongside the app with `/target:exe /main:FeedsLayoutTests` and the same references as `build.bat`. Run that test executable with an optional output directory to save sample renders.
 
 ## License
 

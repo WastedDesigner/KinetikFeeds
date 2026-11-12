@@ -49,7 +49,7 @@ static class Program
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            ToolStripManager.Renderer = new DarkMenu();
+            ToolStripManager.Renderer = KinetikSuite.Look.Current.MenuRenderer();
             Backup.KeyName = "KinetikFeeds"; Backup.AppTitle = "Kinetik Feeds";
             if (!Demo) Backup.OfferRestore();
             var app = new FeedsForm(args.Contains("--settings"));
@@ -536,6 +536,8 @@ static class DemoData
 class Story
 {
     public string Title, Link;
+    public string ImageUrl;
+    public byte[] Thumbnail;
     public DateTime When; // UTC; MinValue when the feed gives no date
     public int Src;
 }
@@ -566,6 +568,52 @@ static class Rss
         s = Regex.Replace(s ?? "", "<[^>]+>", "");
         s = WebUtility.HtmlDecode(s);
         return Regex.Replace(s, @"\s+", " ").Trim();
+    }
+
+    static string ImageUrl(XmlNode item)
+    {
+        foreach (XmlNode n in item.SelectNodes(".//*"))
+        {
+            var a = n.Attributes;
+            if (a == null) continue;
+            string type = a["type"] == null ? "" : a["type"].Value;
+            bool image = n.LocalName == "thumbnail" || type.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || (n.LocalName == "content" && a["medium"] != null && a["medium"].Value == "image");
+            if (image)
+            {
+                var url = a["url"] ?? a["href"];
+                if (url != null && url.Value.Trim() != "") return url.Value.Trim();
+            }
+        }
+        var match = Regex.Match(Child(item, "description", "encoded", "content", "summary") ?? "", @"<img\b[^>]*\bsrc\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+        return match.Success ? WebUtility.HtmlDecode(match.Groups[1].Value) : null;
+    }
+
+    // A missing, oversized or unsupported image must never hide a headline.
+    public static void LoadThumbnail(Story story, string feedUrl, CancellationToken cancel)
+    {
+        if (string.IsNullOrEmpty(story.ImageUrl)) return;
+        try
+        {
+            var url = new Uri(new Uri(feedUrl), story.ImageUrl);
+            var bytes = KinetikSuite.Http.Get(url.ToString(), 1 << 20, "KinetikFeeds/" + Program.Version, cancel, 3000, "image/*");
+            using (var stream = new MemoryStream(bytes))
+            using (var image = Image.FromStream(stream))
+            {
+                if (image.Width > 4096 || image.Height > 4096) return;
+                using (var thumb = new Bitmap(168, 112))
+                using (var g = Graphics.FromImage(thumb))
+                using (var output = new MemoryStream())
+                {
+                    float scale = Math.Max(168f / image.Width, 112f / image.Height);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(image, (168 - image.Width * scale) / 2, (112 - image.Height * scale) / 2, image.Width * scale, image.Height * scale);
+                    thumb.Save(output, ImageFormat.Png);
+                    story.Thumbnail = output.ToArray();
+                }
+            }
+        }
+        catch { }
     }
 
     static DateTime ParseDate(string s)
@@ -622,7 +670,7 @@ static class Rss
             if (link == null) link = Child(it, "guid", "id");
             var t = Clean(Child(it, "title"));
             if (string.IsNullOrEmpty(t)) continue;
-            list.Add(new Story { Title = t, Link = link, When = ParseDate(Child(it, "pubDate", "published", "updated", "date")), Src = src });
+            list.Add(new Story { Title = t, Link = link, ImageUrl = ImageUrl(it), When = ParseDate(Child(it, "pubDate", "published", "updated", "date")), Src = src });
         }
         return list;
     }
@@ -644,7 +692,10 @@ static class Rss
             feedUrl = new Uri(new Uri(url), WebUtility.HtmlDecode(h.Groups[1].Value)).ToString();
             body = Get(feedUrl, cancel);
         }
-        return Parse(body, src, out title);
+        var stories = Parse(body, src, out title);
+        foreach (var story in stories.Where(s => !string.IsNullOrEmpty(s.ImageUrl)))
+            try { story.ImageUrl = new Uri(new Uri(feedUrl), story.ImageUrl).ToString(); } catch { story.ImageUrl = null; }
+        return stories;
     }
 }
 
@@ -1310,6 +1361,7 @@ class FeedsForm : Form
     CancellationTokenSource request;
     int layer, hover = -1;
     float scroll;
+    int tab = -1; // -1 = all feeds, otherwise the index of the feed whose tab is selected (not saved)
     Frame last = new Frame();
     bool dragging, moved, openSettings;
     Point grab, downAt;
@@ -1479,12 +1531,54 @@ class FeedsForm : Form
                     ShareHeadlines();
                     refresh.Interval = c.RefreshMin * 60000; refresh.Start(); Render();
                     if (settings != null && !settings.IsDisposed) settings.FetchFinished();
+                    FetchThumbnails(gen, sources);
                 }
                 finally { cancel.Dispose(); }
             })); } catch { cancel.Dispose(); }
         });
     }
     int generation;
+
+    void FetchThumbnails(int gen, List<Source> sources)
+    {
+        // shortcut: thumbnails cover the two newest stories per feed; expand if older previews are needed.
+        var images = stories.GroupBy(s => s.Src).SelectMany(group => group.Take(2))
+            .Where(s => s.Thumbnail == null && !string.IsNullOrEmpty(s.ImageUrl)).ToList();
+        if (images.Count == 0) return;
+        var cancel = new CancellationTokenSource(); request = cancel;
+        cancel.CancelAfter(15000); var token = cancel.Token;
+        var thumbnails = new byte[images.Count][];
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                System.Threading.Tasks.Parallel.For(0, images.Count,
+                    new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token },
+                    i =>
+                    {
+                        var preview = new Story { ImageUrl = images[i].ImageUrl };
+                        Rss.LoadThumbnail(preview, sources[images[i].Src].Url, token);
+                        thumbnails[i] = preview.Thumbnail;
+                    });
+            }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                try { BeginInvoke((Action)(() =>
+                {
+                    try
+                    {
+                        if (gen != generation || IsDisposed) return;
+                        if (request == cancel) request = null;
+                        for (int i = 0; i < images.Count; i++) images[i].Thumbnail = thumbnails[i];
+                        Render();
+                        if (settings != null && !settings.IsDisposed) settings.PreviewChanged();
+                    }
+                    finally { cancel.Dispose(); }
+                })); } catch { cancel.Dispose(); }
+            }
+        });
+    }
 
     public void MarkAllRead() { ReadList.Add(stories.Select(s => s.Link)); Render(); }
 
@@ -1512,7 +1606,7 @@ class FeedsForm : Form
         {
             var sources = c.List;
             var sb = new System.Text.StringBuilder();
-            foreach (var st in ShownStories())
+            foreach (var st in ShownStories(false))
             {
                 string name = st.Src < sources.Count ? sources[st.Src].Name : "";
                 sb.Append(st.When == DateTime.MinValue ? 0 : st.When.Ticks).Append('\t').Append(Tsv(name)).Append('\t').Append(Tsv(st.Title)).Append('\t').Append(Tsv(st.Link)).Append("\r\n");
@@ -1527,11 +1621,12 @@ class FeedsForm : Form
     }
     static string Tsv(string v) { return (v ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' '); }
 
-    public List<Story> ShownStories()
+    public List<Story> ShownStories(bool byTab = true)
     {
         var sources = c.List;
         var cutoff = c.MaxAgeDays > 0 ? DateTime.UtcNow.AddDays(-c.MaxAgeDays) : DateTime.MinValue;
-        return stories.Where(s => s.Src < sources.Count && sources[s.Src].On && (s.When == DateTime.MinValue || s.When >= cutoff) && !(c.HideRead && ReadList.Has(s.Link)))
+        int only = byTab && tab >= 0 && tab < sources.Count && sources[tab].On && sources.Count(x => x.On) > 0 ? tab : -1;
+        return stories.Where(s => s.Src < sources.Count && sources[s.Src].On && (only < 0 || s.Src == only) &&(s.When == DateTime.MinValue || s.When >= cutoff) && !(c.HideRead && ReadList.Has(s.Link)))
             .Take(c.MaxItems).ToList();
     }
 
@@ -1563,7 +1658,7 @@ class FeedsForm : Form
         }
         int h = dragging && moved ? -1 : HitAt(e.Location);
         if (h != hover) { hover = h; Render(); }
-        bool onButton = last.RefreshHit.Contains(e.Location) || last.GearHit.Contains(e.Location);
+        bool onButton = last.RefreshHit.Contains(e.Location) || last.GearHit.Contains(e.Location) || last.TabHits.Any(r => r.Contains(e.Location));
         Cursor = dragging && moved ? Cursors.SizeAll : h >= 0 || onButton ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
     }
@@ -1583,6 +1678,10 @@ class FeedsForm : Form
             if (wasDrag) c.Save();
             else if (last.RefreshHit.Contains(e.Location)) FetchAll();
             else if (last.GearHit.Contains(e.Location)) OpenSettings(null);
+            else if (last.TabHits.FindIndex(r => r.Contains(e.Location)) >= 0)
+            {
+                tab = last.TabIds[last.TabHits.FindIndex(r => r.Contains(e.Location))]; scroll = 0; Render();
+            }
             else
             {
                 int i = HitAt(e.Location);
@@ -1673,12 +1772,14 @@ class FeedsForm : Form
         public float U = 1, MaxScroll;
         public List<RectangleF> Hits = new List<RectangleF>();
         public RectangleF RefreshHit, GearHit;
+        public List<RectangleF> TabHits = new List<RectangleF>();
+        public List<int> TabIds = new List<int>();
         public Bitmap Bmp;
     }
 
-    static readonly StringFormat FmtStatus = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
     static readonly StringFormat FmtTitle2 = new StringFormat { Trimming = StringTrimming.EllipsisWord };
     static readonly StringFormat FmtTitle1 = new StringFormat { Trimming = StringTrimming.EllipsisWord, FormatFlags = StringFormatFlags.NoWrap };
+    static readonly StringFormat FmtCenter = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
     static readonly StringFormat FmtSource = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
     readonly ShadowCache shadow = new ShadowCache();
 
@@ -1692,33 +1793,62 @@ class FeedsForm : Form
         var shown = ShownStories();
         string family = c.FontName != "" && Draw.Has(c.FontName) ? c.FontName : Theme.IsTerm(c.ThemeName) ? Theme.Mono : Draw.Family;
         f.Margin = (int)(16 * u);
-        float pad = 16 * u;
+        float pad = 12 * u;
         int cardW = (int)(c.Width * u);
+        Func<Story, bool> hasImage = s => s.Thumbnail != null && c.Width >= 260;
         float px = 1f / dpi; // fonts are sized in points at 96 dpi, then scaled by u
 
         using (var titleF = new Font(family, 12.5f * u * px, FontStyle.Bold, GraphicsUnit.Point))
-        using (var headF = new Font(family, 10 * u * px, GraphicsUnit.Point))
-        using (var subF = new Font(family, 8.25f * u * px, GraphicsUnit.Point))
+        using (var headF = new Font(family, 9.25f * u * px, GraphicsUnit.Point))
+        using (var subF = new Font(family, 7.5f * u * px, GraphicsUnit.Point))
         using (var badgeF = new Font(family, 7.75f * u * px, FontStyle.Bold, GraphicsUnit.Point))
         using (var measure = new Bitmap(1, 1))
         using (var mg = Graphics.FromImage(measure))
         {
             mg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            float textW = cardW - pad * 2 - 16 * u;
+            float textW = cardW - pad * 2 - 20 * u;
             float lineH = headF.GetHeight(mg), subH = subF.GetHeight(mg);
             var heights = shown.Select(s =>
             {
-                float h = Math.Min(mg.MeasureString(s.Title, headF, (int)textW).Height, lineH * (c.TwoLines ? 2 : 1));
-                return h + (c.ShowSource ? subH + 3 * u : 0) + 14 * u;
+                float width = textW - (hasImage(s) ? 100 * u : 0);
+                float h = Math.Min(mg.MeasureString(s.Title, headF, Math.Max(1, (int)width)).Height, lineH * (c.TwoLines ? 2 : 1));
+                return Math.Max(h + (c.ShowSource ? subH + 5 * u : 0), hasImage(s) ? 60 * u : 0) + 24 * u;
             }).ToList();
-            float headerH = c.ShowHeader ? titleF.GetHeight(mg) + 16 * u : 0;
+            float headerH = c.ShowHeader ? titleF.GetHeight(mg) + subH + 20 * u : 0;
+
+            // tab strip: "All" plus one tab per switched-on feed, wrapping onto more rows if they don't fit
+            var tabIds = new List<int>(); var tabRects = new List<RectangleF>();
+            if (sources.Any(s => s.On))
+            {
+                tabIds.Add(-1);
+                for (int i = 0; i < sources.Count; i++) if (sources[i].On) tabIds.Add(i);
+            }
+            if (!tabIds.Contains(tab)) tab = -1;
+            float tabH = subH + 8 * u, tabGap = 4 * u, tabAvail = cardW - pad * 2, tabX = 0, tabY = 0;
+            foreach (int id in tabIds)
+            {
+                float w = Math.Min(tabAvail, mg.MeasureString(id < 0 ? "All" : sources[id].Name, subF).Width + 14 * u);
+                if (tabX > 0 && tabX + w > tabAvail) { tabX = 0; tabY += tabH + tabGap; }
+                tabRects.Add(new RectangleF(tabX, tabY, w, tabH));
+                tabX += w + tabGap;
+            }
+            // centre each row of tabs in the card
+            for (int i = 0; i < tabRects.Count; )
+            {
+                int j = i; while (j + 1 < tabRects.Count && tabRects[j + 1].Y == tabRects[i].Y) j++;
+                float shift = (tabAvail - (tabRects[j].Right - tabRects[i].X)) / 2;
+                for (int k = i; k <= j; k++) { var q = tabRects[k]; q.X += shift; tabRects[k] = q; }
+                i = j + 1;
+            }
+            float tabsH = tabIds.Count > 0 ? tabY + tabH + 8 * u : 0;
+
             float listH = heights.Sum();
             if (shown.Count == 0) listH = lineH * 2 + 8 * u;
-            float maxList = Math.Min(c.MaxHeight * u, maxScreenH) - headerH - pad * 2;
+            float maxList = Math.Min(c.MaxHeight * u, maxScreenH) - headerH - tabsH - pad * 2;
             float visibleH = Math.Max(lineH * 2, Math.Min(listH, maxList));
             f.MaxScroll = Math.Max(0, listH - visibleH);
             scrollIn = Math.Min(scrollIn, f.MaxScroll);
-            int cardH = (int)(pad * 2 + headerH + visibleH - (c.ShowHeader ? 0 : 4 * u));
+            int cardH = (int)(pad * 2 + headerH + tabsH + visibleH - (c.ShowHeader ? 0 : 4 * u));
             f.WinW = cardW + f.Margin * 2; f.WinH = cardH + f.Margin * 2;
 
             var bmp = f.Bmp = canvas(f.WinW, f.WinH);
@@ -1730,7 +1860,7 @@ class FeedsForm : Form
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
                 var card = new RectangleF(f.Margin, f.Margin, cardW, cardH);
-                float rad = 14 * u * c.Round / 100f;
+                float rad = 16 * u * c.Round / 100f;
                 if (c.Shadow)
                     shadow.Paint(g, f.WinW, f.WinH, card + "|" + rad + "|" + u + "|" + c.Opacity, sg =>
                     {
@@ -1749,28 +1879,30 @@ class FeedsForm : Form
                     if (c.ShowHeader)
                     {
                         float hh = titleF.GetHeight(g);
-                        float gs = 15 * u;
-                        UI.Glyph(g, "rss", new RectangleF(x, y + (hh - gs) / 2, gs, gs), accent);
-                        float tx = x + gs + 8 * u;
+                        float bs = 22 * u, by = y + (hh - bs) / 2;
+                        f.GearHit = new RectangleF(right - bs, by, bs, bs);
+                        f.RefreshHit = new RectangleF(right - bs * 2 - 2 * u, by, bs, bs);
+                        float tx = x;
                         string title = c.Title.Trim() == "" ? "Feeds" : c.Title.Trim();
-                        g.DrawString(title, titleF, text, tx, y);
-                        tx += g.MeasureString(title, titleF).Width;
-
+                        float titleWidth = Math.Max(1, f.RefreshHit.X - x - 8 * u);
                         int unread = shown.Count(s => !ReadList.Has(s.Link));
-                        if (c.UnreadBadge && unread > 0)
+                        string n = unread + " new";
+                        var sz = g.MeasureString(n, badgeF);
+                        bool badge = c.UnreadBadge && unread > 0 && titleWidth > g.MeasureString(title, titleF).Width + sz.Width + 18 * u;
+                        g.DrawString(title, titleF, text, new RectangleF(x, y, titleWidth - (badge ? sz.Width + 18 * u : 0), hh + u), FmtTitle1);
+                        tx += Math.Min(g.MeasureString(title, titleF).Width, titleWidth);
+
+                        if (badge)
                         {
-                            string n = unread + " new";
-                            var sz = g.MeasureString(n, badgeF);
-                            var pill = new RectangleF(tx + 2 * u, y + (hh - sz.Height - 2 * u) / 2, sz.Width + 8 * u, sz.Height + 2 * u);
+                            // right-aligned, just left of the refresh button
+                            float pw = sz.Width + 8 * u;
+                            var pill = new RectangleF(f.RefreshHit.X - 4 * u - pw, y +(hh - sz.Height - 2 * u) / 2, pw, sz.Height + 2 * u);
                             Draw.Fill(g, pill, pill.Height / 2, Color.FromArgb(th.Light ? 34 : 46, accent));
                             using (var ab = new SolidBrush(th.Light ? Draw.Mix(accent, Color.Black, 0.25f) : Draw.Mix(accent, Color.White, 0.25f)))
-                                g.DrawString(n, badgeF, ab, pill.X + 4 * u, pill.Y + 1 * u);
+                                g.DrawString(n, badgeF, ab, new RectangleF(pill.X, pill.Y + 1.5f * u, pill.Width, pill.Height), FmtCenter);
                         }
 
                         // buttons on the right: settings, refresh
-                        float bs = 22 * u, by = y + (hh - bs) / 2;
-                        f.GearHit = new RectangleF(right - bs + 3 * u, by, bs, bs);
-                        f.RefreshHit = new RectangleF(right - bs * 2, by, bs, bs);
                         UI.Glyph(g, "gear", RectangleF.Inflate(f.GearHit, -4 * u, -4 * u), th.Sub);
                         if (Busy)
                         {
@@ -1781,12 +1913,24 @@ class FeedsForm : Form
                         else UI.Glyph(g, "sync", RectangleF.Inflate(f.RefreshHit, -4 * u, -4 * u), th.Sub);
 
                         string status = Busy && FetchedAt == DateTime.MinValue ? "Loading…" : Errors.Count > 0 && Errors.Count >= sources.Count(s => s.On) ? "Offline"
-                            : Errors.Count > 0 ? "⚠ " + Errors.Count + " failed" : "";
-                        if (status != "") g.DrawString(status, subF, sub, new RectangleF(tx, y, f.RefreshHit.X - 4 * u - tx, hh), FmtStatus);
+                            : Errors.Count > 0 ? Errors.Count + " feed" + (Errors.Count == 1 ? "" : "s") + " unavailable"
+                            : Busy ? "Updating…" : FetchedAt != DateTime.MinValue ? "Updated " + FetchedAt.ToString("HH:mm") : "Latest headlines";
+                        g.DrawString(status, subF, sub, new RectangleF(x, y + hh + u, right - x, subH + 2 * u), FmtSource);
                         y += headerH;
-                        using (var pen = new Pen(th.Line, 1)) g.DrawLine(pen, x, y - 8 * u, right, y - 8 * u);
+                        using (var pen = new Pen(th.Line, 1)) g.DrawLine(pen, x, y - 7 * u, right, y - 7 * u);
                     }
                     else y -= 4 * u;
+
+                    for (int i = 0; i < tabIds.Count; i++)
+                    {
+                        var r = tabRects[i]; r.Offset(x, y - 2 * u);
+                        f.TabHits.Add(r); f.TabIds.Add(tabIds[i]);
+                        bool sel = tabIds[i] == tab;
+                        Draw.Fill(g, r, r.Height / 2, sel ? th.Text : th.Light ? Color.FromArgb(12, 0, 0, 0) : Color.FromArgb(14, 255, 255, 255));
+                        using (var tb = new SolidBrush(sel ? th.Bg : th.Sub))
+                            g.DrawString(tabIds[i] < 0 ? "All" : sources[tabIds[i]].Name, subF, tb, new RectangleF(r.X + 7 * u, r.Y + 1.5f * u, r.Width - 14 * u, r.Height), FmtCenter);
+                    }
+                    y += tabsH;
 
                     var listArea = new RectangleF(card.X, y - 4 * u, card.Width, visibleH + 4 * u);
                     g.SetClip(listArea);
@@ -1801,24 +1945,39 @@ class FeedsForm : Form
                     for (int i = 0; i < shown.Count; i++)
                     {
                         var s = shown[i];
-                        var row = new RectangleF(card.X + pad * 0.45f, iy, card.Width - pad * 0.9f, heights[i] - 2 * u);
+                        var row = new RectangleF(x, iy, right - x, heights[i] - 8 * u);
                         f.Hits.Add(RectangleF.Intersect(row, listArea));
-                        if (i == hoverIn)
-                            Draw.Fill(g, row, 9 * u, th.Light ? Color.FromArgb(14, 0, 0, 0) : Color.FromArgb(20, 255, 255, 255));
+                        Draw.Fill(g, row, 12 * u * c.Round / 100f, th.Light ? Color.FromArgb(i == hoverIn ? 24 : 11, 0, 0, 0) : Color.FromArgb(i == hoverIn ? 30 : 13, 255, 255, 255));
 
                         bool isRead = ReadList.Has(s.Link);
                         var col = s.Src < sources.Count ? sources[s.Src].Color : th.Sub;
-                        float ty = iy + 7 * u, tx = x + 16 * u;
-                        float titleH = Math.Min(g.MeasureString(s.Title, headF, (int)textW).Height, lineH * (c.TwoLines ? 2 : 1));
-                        // a colour bar down the left for the source; hollow once read
-                        var bar = new RectangleF(x + 1 * u, ty + 2 * u, 3 * u, titleH - 4 * u + (c.ShowSource ? subH + 3 * u : 0));
-                        Draw.Fill(g, bar, 1.5f * u, isRead ? Color.FromArgb(70, col) : col);
-                        g.DrawString(s.Title, headF, isRead ? dim : text, new RectangleF(tx, ty, textW, titleH + 1), fmtT);
+                        float ty = iy + 8 * u, tx = x + 10 * u;
+                        float width = textW - (hasImage(s) ? 100 * u : 0);
                         if (c.ShowSource)
                         {
                             string src = s.Src < sources.Count ? sources[s.Src].Name : "";
                             string ago = Ago(s.When);
-                            g.DrawString(src + (ago != "" && src != "" ? "  ·  " : "") + ago, subF, isRead ? dim : sub, new RectangleF(tx, ty + titleH + 3 * u, textW, subH + 2), fmtS);
+                            float icon = 11 * u;
+                            if (!isRead) Draw.Fill(g, new RectangleF(x + 3.5f * u, ty + (subH - 5 * u) / 2, 5 * u, 5 * u), 2.5f * u, accent);
+                            Draw.Fill(g, new RectangleF(tx, ty + (subH - icon) / 2, icon, icon), icon / 2, isRead ? Color.FromArgb(90, col) : col);
+                            UI.Glyph(g, "rss", new RectangleF(tx + 2 * u, ty + (subH - icon) / 2 + 2 * u, icon - 4 * u, icon - 4 * u), Color.White);
+                            g.DrawString(src + (ago != "" && src != "" ? "  ·  " : "") + ago, subF, isRead ? dim : sub, new RectangleF(tx + icon + 5 * u, ty, width - icon - 5 * u, subH + 2 * u), fmtS);
+                            ty += subH + 5 * u;
+                        }
+                        float titleH = Math.Min(g.MeasureString(s.Title, headF, Math.Max(1, (int)width)).Height, lineH * (c.TwoLines ? 2 : 1));
+                        g.DrawString(s.Title, headF, isRead ? dim : text, new RectangleF(tx, ty, width, titleH + 1), fmtT);
+                        if (hasImage(s))
+                        {
+                            var imageRect = new RectangleF(right - 100 * u, iy + 8 * u, 90 * u, 60 * u);
+                            var saved = g.Save();
+                            using (var path = Draw.Round(imageRect, 10 * u * c.Round / 100f))
+                            using (var stream = new MemoryStream(s.Thumbnail))
+                            using (var image = Image.FromStream(stream))
+                            {
+                                g.SetClip(path, CombineMode.Intersect);
+                                g.DrawImage(image, imageRect);
+                            }
+                            g.Restore(saved);
                         }
                         iy += heights[i];
                     }

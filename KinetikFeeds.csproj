@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Kinetik Feeds: WinForms on .NET 8. Needs the .NET 8 Desktop Runtime. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>KinetikFeeds</AssemblyName>
+    <RootNamespace />
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>SYSLIB0014;WFO1000;CS0618</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="KinetikFeeds.cs;SuiteSupport.cs" />
+    <EmbeddedResource Include="icon.ico" LogicalName="icon.ico" />
+  </ItemGroup>
+</Project>
+
