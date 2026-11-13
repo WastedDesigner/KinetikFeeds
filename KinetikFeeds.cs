@@ -1708,7 +1708,7 @@ class FeedsForm : Form
         Uri uri;
         if (s.Link == null || !Uri.TryCreate(s.Link, UriKind.Absolute, out uri) || (uri.Scheme != "http" && uri.Scheme != "https")) return;
         ReadList.Add(new[] { s.Link });
-        try { Process.Start(uri.ToString()); } catch { }
+        try { Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true }); } catch { }
         Render();
     }
 
