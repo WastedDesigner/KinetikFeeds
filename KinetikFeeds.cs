@@ -1500,6 +1500,8 @@ class FeedsForm : Form
     [StructLayout(LayoutKind.Sequential)] struct WINDOWPOS { public IntPtr hwnd, hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetProp(IntPtr h, string n);
+    bool HubHid { get { return GetProp(Handle, "KinetikHubHidden") != IntPtr.Zero; } } // set by Kinetik Hub's "Hide all widgets"
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
@@ -1985,7 +1987,7 @@ class FeedsForm : Form
         if (last.Unread != badge || last.Accent != badgeAccent) SetBadge(last.Unread, last.Accent);
         EnsurePosition();
         surface.Push(Handle, c.X, c.Y);
-        ShowWindow(Handle, 8); // SW_SHOWNA
+        if (!HubHid) ShowWindow(Handle, 8); // SW_SHOWNA
         if (layer == 0) SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
         else if (layer == 2) SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
     }
