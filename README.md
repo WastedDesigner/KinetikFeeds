@@ -15,6 +15,16 @@ It's a small portable app with no installer. It's a companion to [Kinetik Stats]
 
 > **About this project:** I made this for my own desktop and decided to share it in case anyone else finds it useful. If you run into a bug or have an idea for a feature, please [open an issue](../../issues).
 
+## What's new in 2.1
+
+- **New layout:** header with icon and buttons, underlined tabs with an unread count per feed, flat headline rows (dot and bold title while unread, time on the right), and a footer with the unread total and **Open in App**.
+- **Right-click a headline** to read it here, open it in the browser, save it for later, mark it read or unread, or copy its link. Right-click while a feed's tab is selected to mark just that feed as read.
+- **Reader view:** the article's text in its own window, without the page around it.
+- **Saved tab and Notes:** saved headlines get a **Saved** tab and are added as a task to `Read later.md` in Kinetik Notes' folder (Settings → Headlines → Saved for later).
+- **Keyword filters:** mute headlines by word, or tint the ones you care about (Settings → Headlines).
+- **OPML import and export** (Settings → Feeds).
+- **Tray badge:** the tray icon shows the unread count; feeds are checked in the background as often as you choose, from every 5 minutes.
+
 ## What's new in 2.0
 
 Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner/Kinetik) (the taskbar monitor, called just Kinetik until its v4.0), [Kinetik Hub](https://github.com/WastedDesigner/KinetikHub) and the other desktop widgets.

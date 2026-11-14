@@ -24,11 +24,11 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Feeds")]
 [assembly: AssemblyProduct("Kinetik Feeds")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
 
 static class Program
 {
-    public const string Version = "2.0.1";
+    public const string Version = "2.1.0";
     // --demo: made-up feeds and headlines, nothing fetched, read from or saved to this PC.
     // "--theme Name" picks its theme (for screenshots).
     public static bool Demo;
@@ -73,8 +73,8 @@ class Settings
     const string KeyPath = @"Software\KinetikFeeds";
     public int X = int.MinValue, Y = int.MinValue, Width = 340, Scale = 100, Opacity = CommonMenu.DefaultOpacity, Round = 100, Layer = 0;
     public int MaxItems = 15, RefreshMin = 30, MaxHeight = 520, MaxAgeDays = 0, Accent;
-    public bool Locked, Snap = true, ClickThrough, ShowSource = true, TwoLines = true, Shadow = true, Border = true, HideRead, ShowHeader = true, UnreadBadge = true;
-    public string ThemeName = "Midnight", FontName = "", Title = "Feeds";
+    public bool Locked, Snap = true, ClickThrough, ShowSource = true, TwoLines = true, Shadow = true, Border = true, HideRead, ShowHeader = true, UnreadBadge = true, SaveToNotes = true;
+    public string ThemeName = "Midnight", FontName = "", Title = "Feeds", MuteWords = "", HighlightWords = ""; // the word lists are comma-separated
     public string Feeds = "BBC News\thttps://feeds.bbci.co.uk/news/world/rss.xml\nThe Verge\thttps://www.theverge.com/rss/index.xml\nHacker News\thttps://hnrss.org/frontpage";
 
     // One feed per line: name, link, colour (ARGB) and on/off, separated by tabs. Lines from v1.0 have just the first two.
@@ -246,6 +246,135 @@ static class ReadList
         set.Clear(); order.Clear();
         if (Program.Demo) return;
         try { System.IO.File.Delete(File); } catch { }
+    }
+
+    public static void Remove(string link)
+    {
+        if (link == null || !set.Remove(link)) return;
+        order.Remove(link);
+        if (Program.Demo) return;
+        try { Directory.CreateDirectory(Dir); System.IO.File.WriteAllLines(File, order); } catch { }
+    }
+}
+
+// Headlines kept for later, in %LOCALAPPDATA%\KinetikFeeds\saved.tsv: UTC ticks, feed name, title and link, tab-separated, newest saved first.
+static class Saved
+{
+    static string File { get { return Path.Combine(ReadList.Dir, "saved.tsv"); } }
+    public static readonly List<Story> Items = new List<Story>();
+
+    public static void Load()
+    {
+        if (Program.Demo) return;
+        try
+        {
+            foreach (var l in System.IO.File.ReadAllLines(File))
+            {
+                var p = l.Split('\t'); long ticks;
+                if (p.Length < 4 || !long.TryParse(p[0], out ticks)) continue;
+                Items.Add(new Story { When = ticks > 0 ? new DateTime(ticks, DateTimeKind.Utc) : DateTime.MinValue, SourceName = p[1], Title = p[2], Link = p[3], Src = -1 });
+            }
+        }
+        catch { }
+    }
+
+    public static bool Has(string link) { return link != null && Items.Any(s => s.Link == link); }
+
+    public static void Add(Story s, string source)
+    {
+        Items.Insert(0, new Story { Title = s.Title, Link = s.Link, When = s.When, SourceName = source, Src = -1 });
+        Write();
+    }
+
+    public static void Remove(string link) { Items.RemoveAll(s => s.Link == link); Write(); }
+
+    static string Tsv(string v) { return (v ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' '); }
+
+    static void Write()
+    {
+        if (Program.Demo) return;
+        try
+        {
+            Directory.CreateDirectory(ReadList.Dir);
+            System.IO.File.WriteAllLines(File, Items.Select(s => (s.When == DateTime.MinValue ? 0 : s.When.Ticks) + "\t" + Tsv(s.SourceName) + "\t" + Tsv(s.Title) + "\t" + Tsv(s.Link)));
+        }
+        catch { }
+    }
+}
+
+// Saved headlines also go to a note: a task line in "Read later.md" in Kinetik Notes' folder, which Notes picks up by itself.
+static class ReadLater
+{
+    public const string NoteName = "Read later.md";
+
+    // Kinetik Notes keeps its folder in HKCU\Software\KinetikNotes\Folder; null when it isn't set or doesn't exist.
+    public static string NotesFolder()
+    {
+        try
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(@"Software\KinetikNotes"))
+            {
+                var f = k == null ? null : k.GetValue("Folder") as string;
+                return !string.IsNullOrEmpty(f) && Directory.Exists(f) ? f : null;
+            }
+        }
+        catch { return null; }
+    }
+
+    public static void ToNotes(string folder, string title, string link, string source)
+    {
+        var path = Path.Combine(folder, NoteName);
+        link = link.Replace(" ", "%20").Replace(")", "%29");
+        var line = "- [ ] [" + title.Replace("[", "(").Replace("]", ")") + "](" + link + ")" + (source != "" ? " — " + source : "") + " (saved " + DateTime.Now.ToString("d MMM yyyy", CultureInfo.InvariantCulture) + ")";
+        if (!File.Exists(path))
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
+                { var b = new UTF8Encoding(false).GetBytes("# Read later\n\n" + line + "\n"); fs.Write(b, 0, b.Length); }
+                return;
+            }
+            catch (IOException) when (File.Exists(path)) { } // created meanwhile: append instead
+        }
+        // SafeEdit serialises with the other Kinetik apps and keeps a recovery copy; null means "already there, no change".
+        KinetikSuite.SafeEdit.Update(path, null, doc => doc.Text.Contains("](" + link + ")") ? null : doc.Text + (doc.Text.EndsWith("\n") ? "" : "\n") + line + "\n");
+    }
+}
+
+// OPML, the standard way to move a feed list between readers.
+static class Opml
+{
+    public static List<Source> Read(string xml)
+    {
+        var doc = new XmlDocument { XmlResolver = null };
+        using (var r = XmlReader.Create(new StringReader(xml), new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore, XmlResolver = null })) doc.Load(r);
+        var list = new List<Source>();
+        foreach (XmlNode n in doc.SelectNodes("//outline[@xmlUrl]"))
+        {
+            var url = n.Attributes["xmlUrl"].Value.Trim(); Uri u;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out u) || (u.Scheme != "http" && u.Scheme != "https")) continue;
+            var name = n.Attributes["title"] ?? n.Attributes["text"];
+            list.Add(new Source { Name = name == null || name.Value.Trim() == "" ? u.Host.Replace("www.", "") : name.Value.Trim(), Url = url });
+        }
+        return list;
+    }
+
+    public static void Write(string path, IEnumerable<Source> sources)
+    {
+        using (var w = XmlWriter.Create(path, new XmlWriterSettings { Indent = true, Encoding = new UTF8Encoding(false) }))
+        {
+            w.WriteStartDocument();
+            w.WriteStartElement("opml"); w.WriteAttributeString("version", "2.0");
+            w.WriteStartElement("head"); w.WriteElementString("title", "Kinetik Feeds"); w.WriteEndElement();
+            w.WriteStartElement("body");
+            foreach (var s in sources)
+            {
+                w.WriteStartElement("outline");
+                w.WriteAttributeString("type", "rss"); w.WriteAttributeString("text", s.Name); w.WriteAttributeString("title", s.Name); w.WriteAttributeString("xmlUrl", s.Url);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement(); w.WriteEndElement(); w.WriteEndDocument();
+        }
     }
 }
 
@@ -536,6 +665,7 @@ static class DemoData
 class Story
 {
     public string Title, Link;
+    public string SourceName; // only for saved headlines, whose feed may be gone (Src is -1)
     public string ImageUrl;
     public byte[] Thumbnail;
     public DateTime When; // UTC; MinValue when the feed gives no date
@@ -673,6 +803,30 @@ static class Rss
             list.Add(new Story { Title = t, Link = link, ImageUrl = ImageUrl(it), When = ParseDate(Child(it, "pubDate", "published", "updated", "date")), Src = src });
         }
         return list;
+    }
+
+    // Reader view: the readable text of an article page as (is heading, text) blocks. A heuristic, not a full readability port:
+    // takes the longest <article>, else <main>, else the body, and keeps headings, paragraphs and list items (short fragments are menus and captions).
+    // shortcut: pages are decoded as UTF-8 and pages that need JavaScript give nothing; upgrade if either shows up in real use.
+    public static List<KeyValuePair<bool, string>> Article(string html)
+    {
+        html = Regex.Replace(html ?? "", @"<!--.*?-->", "", RegexOptions.Singleline);
+        html = Regex.Replace(html, @"<(script|style|noscript|svg|nav|header|footer|aside|form|figure|iframe)\b[^>]*>.*?</\1>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        string region = null;
+        foreach (var tag in new[] { "article", "main", "body" })
+        {
+            region = Regex.Matches(html, "<" + tag + @"\b[^>]*>(.*?)</" + tag + ">", RegexOptions.Singleline | RegexOptions.IgnoreCase)
+                .Cast<Match>().Select(m => m.Groups[1].Value).OrderByDescending(s => s.Length).FirstOrDefault();
+            if (region != null && Regex.Matches(region, "<p\\b", RegexOptions.IgnoreCase).Count >= 2) break;
+        }
+        var blocks = new List<KeyValuePair<bool, string>>();
+        foreach (Match m in Regex.Matches(region ?? html, @"<(p|h[1-4]|li)\b[^>]*>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase))
+        {
+            string text = Clean(m.Groups[2].Value);
+            bool heading = m.Groups[1].Value.Length == 2 && char.ToLowerInvariant(m.Groups[1].Value[0]) == 'h';
+            if (text.Length >= (heading ? 3 : 40)) blocks.Add(new KeyValuePair<bool, string>(heading, m.Groups[1].Value.ToLowerInvariant() == "li" ? "•  " + text : text));
+        }
+        return blocks;
     }
 
     // Fetches a feed. If the link is a web page rather than a feed, finds the feed it advertises.
@@ -911,6 +1065,10 @@ static class UI
                     g.FillEllipse(b, R(0.14f, 0.7f, 0.16f, 0.16f));
                     g.DrawArc(p, R(-0.24f, 0.18f, 0.9f, 0.9f), 270, 90);
                     g.DrawArc(p, R(-0.5f, -0.06f, 1.38f, 1.38f), 270, 90);
+                    break;
+                case "open":
+                    g.DrawLines(p, new[] { P(0.46f, 0.2f), P(0.2f, 0.2f), P(0.2f, 0.8f), P(0.8f, 0.8f), P(0.8f, 0.54f) });
+                    g.DrawLine(p, P(0.48f, 0.52f), P(0.86f, 0.14f)); g.DrawLines(p, new[] { P(0.62f, 0.14f), P(0.86f, 0.14f), P(0.86f, 0.38f) });
                     break;
                 case "news":
                     using (var path = Draw.Round(R(0.12f, 0.16f, 0.76f, 0.68f), s * 0.08f)) g.DrawPath(p, path);
@@ -1344,6 +1502,7 @@ class FeedsForm : Form
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
     public readonly Settings Cfg = Settings.Load();
     Settings c { get { return Cfg; } }
@@ -1361,7 +1520,9 @@ class FeedsForm : Form
     CancellationTokenSource request;
     int layer, hover = -1;
     float scroll;
-    int tab = -1; // -1 = all feeds, otherwise the index of the feed whose tab is selected (not saved)
+    int tab = -1; // -1 = all feeds, -2 = saved for later, otherwise the index of the feed whose tab is selected (not saved)
+    Story menuStory; // the headline that was right-clicked, for the quick menu
+    IntPtr badgeIcon; int badge = -1; Color badgeAccent; // the tray icon with the unread count drawn on it
     Frame last = new Frame();
     bool dragging, moved, openSettings;
     Point grab, downAt;
@@ -1371,7 +1532,7 @@ class FeedsForm : Form
     {
         this.openSettings = openSettings;
         layer = c.Layer;
-        ReadList.Load();
+        ReadList.Load(); Saved.Load();
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -1437,7 +1598,7 @@ class FeedsForm : Form
     protected override void Dispose(bool disposing)
     {
         surface.Dispose();
-        if (disposing) { generation++; if (request != null) { request.Cancel(); request = null; } SystemEvents.PowerModeChanged -= OnPower; spin.Dispose(); refresh.Dispose(); minute.Dispose(); tray.Dispose(); menu.Dispose(); shadow.Dispose(); }
+        if (disposing) { generation++; if (request != null) { request.Cancel(); request = null; } SystemEvents.PowerModeChanged -= OnPower; spin.Dispose(); refresh.Dispose(); minute.Dispose(); tray.Dispose(); menu.Dispose(); shadow.Dispose(); if (badgeIcon != IntPtr.Zero) DestroyIcon(badgeIcon); }
         base.Dispose(disposing);
     }
 
@@ -1489,11 +1650,12 @@ class FeedsForm : Form
     {
         if (Busy && !force) return;
         if (request != null) request.Cancel();
+        var sources = c.List.Select(source => new Source { Name = source.Name, Url = source.Url, On = source.On, Color = source.Color }).ToList();
         var cancel = new CancellationTokenSource(); request = cancel;
-        cancel.CancelAfter(20000); var token = cancel.Token;
+        cancel.CancelAfter(20000 + 1500 * sources.Count); // four feeds at a time, so a long list (an imported OPML) needs longer
+        var token = cancel.Token;
         Busy = true; int gen = ++generation;
         refresh.Stop(); if (c.ShowHeader) spin.Start(); Render();
-        var sources = c.List.Select(source => new Source { Name = source.Name, Url = source.Url, On = source.On, Color = source.Color }).ToList();
         ThreadPool.QueueUserWorkItem(_ =>
         {
             var all = new List<Story>(); var errs = new Dictionary<int, string>(); var counts = new Dictionary<int, int>(); var gate = new object();
@@ -1581,6 +1743,7 @@ class FeedsForm : Form
     }
 
     public void MarkAllRead() { ReadList.Add(stories.Select(s => s.Link)); Render(); }
+    void MarkFeedRead(int src) { ReadList.Add(stories.Where(s => s.Src == src).Select(s => s.Link)); Render(); }
 
     public static string Friendly(Exception ex)
     {
@@ -1621,13 +1784,46 @@ class FeedsForm : Form
     }
     static string Tsv(string v) { return (v ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' '); }
 
-    public List<Story> ShownStories(bool byTab = true)
+    // Every headline that passes the filters (feeds on, age, muted words, hide-read), before the tab and the "headlines to show" limit.
+    // The unread counts and the tray badge count these, not just the rows on show.
+    public List<Story> Visible()
     {
         var sources = c.List;
         var cutoff = c.MaxAgeDays > 0 ? DateTime.UtcNow.AddDays(-c.MaxAgeDays) : DateTime.MinValue;
-        int only = byTab && tab >= 0 && tab < sources.Count && sources[tab].On && sources.Count(x => x.On) > 0 ? tab : -1;
-        return stories.Where(s => s.Src < sources.Count && sources[s.Src].On && (only < 0 || s.Src == only) &&(s.When == DateTime.MinValue || s.When >= cutoff) && !(c.HideRead && ReadList.Has(s.Link)))
-            .Take(c.MaxItems).ToList();
+        return stories.Where(s => s.Src < sources.Count && sources[s.Src].On && (s.When == DateTime.MinValue || s.When >= cutoff)
+            && !(c.HideRead && ReadList.Has(s.Link)) && !HasWord(c.MuteWords, s.Title)).ToList();
+    }
+
+    public List<Story> ShownStories(bool byTab = true)
+    {
+        if (byTab && tab == -2) return Saved.Items.ToList();
+        var sources = c.List;
+        int only = byTab && tab >= 0 && tab < sources.Count && sources[tab].On ? tab : -1;
+        return Visible().Where(s => only < 0 || s.Src == only).Take(c.MaxItems).ToList();
+    }
+
+    // Does the title contain any of the comma-separated words (ignoring case)?
+    public static bool HasWord(string words, string title)
+    {
+        foreach (var w in (words ?? "").Split(',', ';', '\n'))
+            if (w.Trim() != "" && (title ?? "").IndexOf(w.Trim(), StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
+        return false;
+    }
+
+    static string SourceOf(Story s, List<Source> sources) { return s.SourceName ?? (s.Src >= 0 && s.Src < sources.Count ? sources[s.Src].Name : ""); }
+
+    static bool IsWeb(string link)
+    {
+        Uri uri;
+        return link != null && Uri.TryCreate(link, UriKind.Absolute, out uri) && (uri.Scheme == "http" || uri.Scheme == "https");
+    }
+
+    // 14:37 for today's headlines, "12 Nov" for older ones.
+    public static string Stamp(DateTime utc)
+    {
+        if (utc == DateTime.MinValue) return "";
+        var t = utc.ToLocalTime();
+        return t.Date == DateTime.Today ? t.ToString("HH:mm") : t.ToString("d MMM");
     }
 
     // ---- mouse: drag to move, click a headline to open it, wheel to scroll, right-click for the menu
@@ -1658,7 +1854,7 @@ class FeedsForm : Form
         }
         int h = dragging && moved ? -1 : HitAt(e.Location);
         if (h != hover) { hover = h; Render(); }
-        bool onButton = last.RefreshHit.Contains(e.Location) || last.GearHit.Contains(e.Location) || last.TabHits.Any(r => r.Contains(e.Location));
+        bool onButton = last.RefreshHit.Contains(e.Location) || last.GearHit.Contains(e.Location) || last.OpenHit.Contains(e.Location) || last.TabHits.Any(r => r.Contains(e.Location));
         Cursor = dragging && moved ? Cursors.SizeAll : h >= 0 || onButton ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
     }
@@ -1677,7 +1873,7 @@ class FeedsForm : Form
             dragging = false;
             if (wasDrag) c.Save();
             else if (last.RefreshHit.Contains(e.Location)) FetchAll();
-            else if (last.GearHit.Contains(e.Location)) OpenSettings(null);
+            else if (last.GearHit.Contains(e.Location) || last.OpenHit.Contains(e.Location)) OpenSettings(null);
             else if (last.TabHits.FindIndex(r => r.Contains(e.Location)) >= 0)
             {
                 tab = last.TabIds[last.TabHits.FindIndex(r => r.Contains(e.Location))]; scroll = 0; Render();
@@ -1689,7 +1885,12 @@ class FeedsForm : Form
                 if (i >= 0 && i < shown.Count) Open(shown[i]);
             }
         }
-        else if (e.Button == MouseButtons.Right) menu.Show(Cursor.Position);
+        else if (e.Button == MouseButtons.Right)
+        {
+            int i = HitAt(e.Location); var shown = ShownStories();
+            menuStory = i >= 0 && i < shown.Count ? shown[i] : null;
+            menu.Show(Cursor.Position);
+        }
         base.OnMouseUp(e);
     }
 
@@ -1705,10 +1906,32 @@ class FeedsForm : Form
 
     void Open(Story s)
     {
-        Uri uri;
-        if (s.Link == null || !Uri.TryCreate(s.Link, UriKind.Absolute, out uri) || (uri.Scheme != "http" && uri.Scheme != "https")) return;
+        if (!IsWeb(s.Link)) return;
         ReadList.Add(new[] { s.Link });
-        try { Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true }); } catch { }
+        try { Process.Start(new ProcessStartInfo(new Uri(s.Link).ToString()) { UseShellExecute = true }); } catch { }
+        Render();
+    }
+
+    void OpenReader(Story s)
+    {
+        if (!IsWeb(s.Link)) return;
+        ReadList.Add(new[] { s.Link });
+        new ReaderForm(this, s, SourceOf(s, c.List)).Show();
+        Render();
+    }
+
+    // Keeps the headline in the Saved tab and adds it to "Read later" in Kinetik Notes' folder (when there is one and it's switched on).
+    public void Save(Story s)
+    {
+        if (!IsWeb(s.Link) || Saved.Has(s.Link)) return;
+        string source = SourceOf(s, c.List), title = s.Title, link = s.Link, folder = c.SaveToNotes && !Program.Demo ? ReadLater.NotesFolder() : null;
+        Saved.Add(s, source);
+        if (folder != null)
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { ReadLater.ToNotes(folder, title, link, source); }
+                catch (Exception ex) { try { BeginInvoke((Action)(() => tray.ShowBalloonTip(4000, "Kinetik Feeds", "Saved here, but it couldn't be added to Notes: " + ex.Message, ToolTipIcon.Warning))); } catch { } }
+            });
         Render();
     }
 
@@ -1759,6 +1982,7 @@ class FeedsForm : Form
 
         last = Compose(u, DeviceDpi / 96f, scroll, hover, screen.WorkingArea.Height - (int)(24 * u), (w, h) => surface.Canvas(w, h));
         scroll = Math.Min(scroll, last.MaxScroll);
+        if (last.Unread != badge || last.Accent != badgeAccent) SetBadge(last.Unread, last.Accent);
         EnsurePosition();
         surface.Push(Handle, c.X, c.Y);
         ShowWindow(Handle, 8); // SW_SHOWNA
@@ -1766,12 +1990,46 @@ class FeedsForm : Form
         else if (layer == 2) SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
     }
 
+    // The app icon with the unread count in a corner, and the count in the tooltip. The tray's copy of the icon is the
+    // shell's own, so the previous handle can be destroyed as soon as the new one is set.
+    void SetBadge(int unread, Color accent)
+    {
+        badge = unread; badgeAccent = accent;
+        tray.Text = (Program.Demo ? "Kinetik Feeds (demo)" : "Kinetik Feeds") + (unread > 0 ? ": " + unread + " unread" : "");
+        if (unread == 0)
+        {
+            tray.Icon = AppIcon;
+            if (badgeIcon != IntPtr.Zero) { DestroyIcon(badgeIcon); badgeIcon = IntPtr.Zero; }
+            return;
+        }
+        string n = unread > 99 ? "99+" : unread.ToString();
+        using (var bmp = new Bitmap(32, 32))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            using (var font = new Font("Segoe UI", n.Length > 2 ? 9f : 11.5f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var fill = new SolidBrush(accent))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                g.DrawIcon(AppIcon, new Rectangle(0, 0, 32, 32));
+                var dot = new RectangleF(32 - 21, 32 - 21, 21, 21);
+                g.FillEllipse(fill, dot);
+                float lum = (0.3f * accent.R + 0.59f * accent.G + 0.11f * accent.B) / 255;
+                using (var ink = new SolidBrush(lum > 0.6f ? Color.Black : Color.White)) g.DrawString(n, font, ink, dot, FmtCenter);
+            }
+            var h = bmp.GetHicon();
+            tray.Icon = Icon.FromHandle(h);
+            if (badgeIcon != IntPtr.Zero) DestroyIcon(badgeIcon);
+            badgeIcon = h;
+        }
+    }
+
     public class Frame
     {
-        public int WinW = 1, WinH = 1, Margin;
+        public int WinW = 1, WinH = 1, Margin, Unread;
         public float U = 1, MaxScroll;
+        public Color Accent;
         public List<RectangleF> Hits = new List<RectangleF>();
-        public RectangleF RefreshHit, GearHit;
+        public RectangleF RefreshHit, GearHit, OpenHit;
         public List<RectangleF> TabHits = new List<RectangleF>();
         public List<int> TabIds = new List<int>();
         public Bitmap Bmp;
@@ -1783,72 +2041,83 @@ class FeedsForm : Form
     static readonly StringFormat FmtSource = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
     readonly ShadowCache shadow = new ShadowCache();
 
+    static readonly StringFormat FmtRight = new StringFormat { Alignment = StringAlignment.Far, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+    static readonly StringFormat FmtTab = new StringFormat(StringFormat.GenericTypographic) { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+
     // Lays out and draws the card into a bitmap from canvas(width, height). Used by the widget and the Settings preview.
+    // Top to bottom: header (icon, title, refresh and settings buttons); tabs (All, one per feed, Saved) with unread counts;
+    // the headlines (dot and bold title while unread, time on the right, feed name below); footer (unread count, Open in App).
     public Frame Compose(float u, float dpi, float scrollIn, int hoverIn, int maxScreenH, Func<int, int, Bitmap> canvas)
     {
         var f = new Frame { U = u };
         var th = Theme.Get(c.ThemeName);
         Color accent = c.Accent != 0 ? Color.FromArgb(255, Color.FromArgb(c.Accent)) : th.Accent;
+        f.Accent = accent;
         var sources = c.List;
+
+        var tabIds = new List<int>();
+        if (sources.Any(s => s.On))
+        {
+            tabIds.Add(-1);
+            for (int i = 0; i < sources.Count; i++) if (sources[i].On) tabIds.Add(i);
+            if (Saved.Items.Count > 0) tabIds.Add(-2);
+        }
+        if (!tabIds.Contains(tab)) tab = -1;
         var shown = ShownStories();
+        var unreadBy = Visible().Where(s => !ReadList.Has(s.Link)).GroupBy(s => s.Src).ToDictionary(grp => grp.Key, grp => grp.Count());
+        int unread = f.Unread = unreadBy.Values.Sum();
+
         string family = c.FontName != "" && Draw.Has(c.FontName) ? c.FontName : Theme.IsTerm(c.ThemeName) ? Theme.Mono : Draw.Family;
         f.Margin = (int)(16 * u);
-        float pad = 12 * u;
+        float pad = 16 * u;
         int cardW = (int)(c.Width * u);
         Func<Story, bool> hasImage = s => s.Thumbnail != null && c.Width >= 260;
         float px = 1f / dpi; // fonts are sized in points at 96 dpi, then scaled by u
 
-        using (var titleF = new Font(family, 12.5f * u * px, FontStyle.Bold, GraphicsUnit.Point))
+        using (var titleF = new Font(family, 10.5f * u * px, FontStyle.Bold, GraphicsUnit.Point))
         using (var headF = new Font(family, 9.25f * u * px, GraphicsUnit.Point))
+        using (var headB = new Font(family, 9.25f * u * px, FontStyle.Bold, GraphicsUnit.Point))
         using (var subF = new Font(family, 7.5f * u * px, GraphicsUnit.Point))
-        using (var badgeF = new Font(family, 7.75f * u * px, FontStyle.Bold, GraphicsUnit.Point))
+        using (var tabF = new Font(family, 8f * u * px, FontStyle.Bold, GraphicsUnit.Point))
+        using (var footF = new Font(family, 8f * u * px, GraphicsUnit.Point))
         using (var measure = new Bitmap(1, 1))
         using (var mg = Graphics.FromImage(measure))
         {
             mg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            float textW = cardW - pad * 2 - 20 * u;
+            float inner = cardW - pad * 2, textL = 17 * u, vpad = 11 * u;
             float lineH = headF.GetHeight(mg), subH = subF.GetHeight(mg);
+            float timeW = Math.Max(mg.MeasureString("00:00", subF).Width, mg.MeasureString("00 May", subF).Width);
             var heights = shown.Select(s =>
             {
-                float width = textW - (hasImage(s) ? 100 * u : 0);
-                float h = Math.Min(mg.MeasureString(s.Title, headF, Math.Max(1, (int)width)).Height, lineH * (c.TwoLines ? 2 : 1));
-                return Math.Max(h + (c.ShowSource ? subH + 5 * u : 0), hasImage(s) ? 60 * u : 0) + 24 * u;
+                float tw = Math.Max(1, inner - textL - timeW - 8 * u - (hasImage(s) ? 100 * u : 0));
+                float titleH = Math.Min(mg.MeasureString(s.Title, ReadList.Has(s.Link) ? headF : headB, (int)tw).Height, lineH * (c.TwoLines ? 2 : 1));
+                return Math.Max(titleH + (c.ShowSource ? subH + 3 * u : 0), hasImage(s) ? 60 * u : 0) + vpad * 2;
             }).ToList();
-            float headerH = c.ShowHeader ? titleF.GetHeight(mg) + subH + 20 * u : 0;
+            float hdrH = c.ShowHeader ? 58 * u : 0, footH = c.UnreadBadge ? 40 * u : 0;
 
-            // tab strip: "All" plus one tab per switched-on feed, wrapping onto more rows if they don't fit
-            var tabIds = new List<int>(); var tabRects = new List<RectangleF>();
-            if (sources.Any(s => s.On))
-            {
-                tabIds.Add(-1);
-                for (int i = 0; i < sources.Count; i++) if (sources[i].On) tabIds.Add(i);
-            }
-            if (!tabIds.Contains(tab)) tab = -1;
-            float tabH = subH + 8 * u, tabGap = 4 * u, tabAvail = cardW - pad * 2, tabX = 0, tabY = 0;
+            // tab labels in capitals, each followed by its unread count (for Saved, how many are saved); rows wrap if they don't fit
+            float tabH = 34 * u, tabGap = 20 * u, tabX = 0, tabY = 0;
+            var tabRects = new List<RectangleF>(); var tabLabels = new List<string>(); var tabCounts = new List<string>(); var tabLabelW = new List<float>(); var tabCountW = new List<float>();
             foreach (int id in tabIds)
             {
-                float w = Math.Min(tabAvail, mg.MeasureString(id < 0 ? "All" : sources[id].Name, subF).Width + 14 * u);
-                if (tabX > 0 && tabX + w > tabAvail) { tabX = 0; tabY += tabH + tabGap; }
-                tabRects.Add(new RectangleF(tabX, tabY, w, tabH));
+                string label = (id == -1 ? "All" : id == -2 ? "Saved" : sources[id].Name).ToUpperInvariant();
+                int n = id == -1 ? unread : id == -2 ? Saved.Items.Count : unreadBy.ContainsKey(id) ? unreadBy[id] : 0;
+                string count = n > 999 ? "999+" : n > 0 ? n.ToString() : "";
+                float lw = mg.MeasureString(label, tabF, 9999, FmtTab).Width, cw = count == "" ? 0 : mg.MeasureString(count, tabF, 9999, FmtTab).Width;
+                float w = Math.Min(inner, lw + (count == "" ? 0 : 6 * u + cw));
+                if (tabX > 0 && tabX + w > inner) { tabX = 0; tabY += tabH; }
+                tabRects.Add(new RectangleF(tabX, tabY, w, tabH)); tabLabels.Add(label); tabCounts.Add(count); tabLabelW.Add(lw); tabCountW.Add(cw);
                 tabX += w + tabGap;
             }
-            // centre each row of tabs in the card
-            for (int i = 0; i < tabRects.Count; )
-            {
-                int j = i; while (j + 1 < tabRects.Count && tabRects[j + 1].Y == tabRects[i].Y) j++;
-                float shift = (tabAvail - (tabRects[j].Right - tabRects[i].X)) / 2;
-                for (int k = i; k <= j; k++) { var q = tabRects[k]; q.X += shift; tabRects[k] = q; }
-                i = j + 1;
-            }
-            float tabsH = tabIds.Count > 0 ? tabY + tabH + 8 * u : 0;
+            float tabsH = tabIds.Count > 0 ? tabY + tabH : 0;
 
             float listH = heights.Sum();
-            if (shown.Count == 0) listH = lineH * 2 + 8 * u;
-            float maxList = Math.Min(c.MaxHeight * u, maxScreenH) - headerH - tabsH - pad * 2;
+            if (shown.Count == 0) listH = lineH * 2 + 24 * u;
+            float maxList = Math.Min(c.MaxHeight * u, maxScreenH) - hdrH - tabsH - footH;
             float visibleH = Math.Max(lineH * 2, Math.Min(listH, maxList));
             f.MaxScroll = Math.Max(0, listH - visibleH);
             scrollIn = Math.Min(scrollIn, f.MaxScroll);
-            int cardH = (int)(pad * 2 + headerH + tabsH + visibleH - (c.ShowHeader ? 0 : 4 * u));
+            int cardH = (int)(hdrH + tabsH + visibleH + footH);
             f.WinW = cardW + f.Margin * 2; f.WinH = cardH + f.Margin * 2;
 
             var bmp = f.Bmp = canvas(f.WinW, f.WinH);
@@ -1873,102 +2142,89 @@ class FeedsForm : Form
 
                 using (var text = new SolidBrush(th.Text))
                 using (var sub = new SolidBrush(th.Sub))
-                using (var dim = new SolidBrush(Draw.Mix(th.Sub, th.Bg, 0.3f)))
+                using (var readInk = new SolidBrush(Draw.Mix(th.Text, th.Bg, 0.35f)))
+                using (var line = new Pen(th.Line, 1))
                 {
-                    float x = card.X + pad, y = card.Y + pad, right = card.Right - pad;
+                    float x = card.X + pad, y = card.Y, right = card.Right - pad;
+                    Color accentInk = th.Light ? Draw.Mix(accent, Color.Black, 0.2f) : accent;
+
                     if (c.ShowHeader)
                     {
-                        float hh = titleF.GetHeight(g);
-                        float bs = 22 * u, by = y + (hh - bs) / 2;
-                        f.GearHit = new RectangleF(right - bs, by, bs, bs);
-                        f.RefreshHit = new RectangleF(right - bs * 2 - 2 * u, by, bs, bs);
-                        float tx = x;
-                        string title = c.Title.Trim() == "" ? "Feeds" : c.Title.Trim();
-                        float titleWidth = Math.Max(1, f.RefreshHit.X - x - 8 * u);
-                        int unread = shown.Count(s => !ReadList.Has(s.Link));
-                        string n = unread + " new";
-                        var sz = g.MeasureString(n, badgeF);
-                        bool badge = c.UnreadBadge && unread > 0 && titleWidth > g.MeasureString(title, titleF).Width + sz.Width + 18 * u;
-                        g.DrawString(title, titleF, text, new RectangleF(x, y, titleWidth - (badge ? sz.Width + 18 * u : 0), hh + u), FmtTitle1);
-                        tx += Math.Min(g.MeasureString(title, titleF).Width, titleWidth);
-
-                        if (badge)
+                        float bs = 32 * u, hy = y + (hdrH - bs) / 2;
+                        f.GearHit = new RectangleF(right - bs, hy, bs, bs);
+                        f.RefreshHit = new RectangleF(f.GearHit.X - 8 * u - bs, hy, bs, bs);
+                        var tile = new RectangleF(x, hy, bs, bs);
+                        Draw.Fill(g, tile, 9 * u, Color.FromArgb(th.Light ? 30 : 40, accent));
+                        Draw.Stroke(g, tile, 9 * u, Color.FromArgb(110, accent), 1);
+                        UI.Glyph(g, "rss", RectangleF.Inflate(tile, -8 * u, -8 * u), accentInk);
+                        string title = (c.Title.Trim() == "" ? "Feeds" : c.Title.Trim()).ToUpperInvariant();
+                        float tx = tile.Right + 12 * u, hh = titleF.GetHeight(g);
+                        g.DrawString(title, titleF, text, new RectangleF(tx, y + (hdrH - hh) / 2, Math.Max(1, f.RefreshHit.X - 8 * u - tx), hh + u), FmtTitle1);
+                        foreach (var btn in new[] { f.RefreshHit, f.GearHit })
                         {
-                            // right-aligned, just left of the refresh button
-                            float pw = sz.Width + 8 * u;
-                            var pill = new RectangleF(f.RefreshHit.X - 4 * u - pw, y +(hh - sz.Height - 2 * u) / 2, pw, sz.Height + 2 * u);
-                            Draw.Fill(g, pill, pill.Height / 2, Color.FromArgb(th.Light ? 34 : 46, accent));
-                            using (var ab = new SolidBrush(th.Light ? Draw.Mix(accent, Color.Black, 0.25f) : Draw.Mix(accent, Color.White, 0.25f)))
-                                g.DrawString(n, badgeF, ab, new RectangleF(pill.X, pill.Y + 1.5f * u, pill.Width, pill.Height), FmtCenter);
+                            Draw.Fill(g, btn, 9 * u, th.Light ? Color.FromArgb(10, 0, 0, 0) : Color.FromArgb(14, 255, 255, 255));
+                            Draw.Stroke(g, btn, 9 * u, th.Light ? Color.FromArgb(40, 0, 0, 0) : Color.FromArgb(50, 255, 255, 255), 1);
                         }
-
-                        // buttons on the right: settings, refresh
-                        UI.Glyph(g, "gear", RectangleF.Inflate(f.GearHit, -4 * u, -4 * u), th.Sub);
+                        UI.Glyph(g, "gear", RectangleF.Inflate(f.GearHit, -8 * u, -8 * u), th.Text);
                         if (Busy)
                         {
                             float sweep = (float)(DateTime.Now.TimeOfDay.TotalMilliseconds / 3 % 360);
                             using (var pen = new Pen(accent, 1.8f * u) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                                g.DrawArc(pen, RectangleF.Inflate(f.RefreshHit, -5 * u, -5 * u), sweep, 270);
+                                g.DrawArc(pen, RectangleF.Inflate(f.RefreshHit, -9 * u, -9 * u), sweep, 270);
                         }
-                        else UI.Glyph(g, "sync", RectangleF.Inflate(f.RefreshHit, -4 * u, -4 * u), th.Sub);
-
-                        string status = Busy && FetchedAt == DateTime.MinValue ? "Loading…" : Errors.Count > 0 && Errors.Count >= sources.Count(s => s.On) ? "Offline"
-                            : Errors.Count > 0 ? Errors.Count + " feed" + (Errors.Count == 1 ? "" : "s") + " unavailable"
-                            : Busy ? "Updating…" : FetchedAt != DateTime.MinValue ? "Updated " + FetchedAt.ToString("HH:mm") : "Latest headlines";
-                        g.DrawString(status, subF, sub, new RectangleF(x, y + hh + u, right - x, subH + 2 * u), FmtSource);
-                        y += headerH;
-                        using (var pen = new Pen(th.Line, 1)) g.DrawLine(pen, x, y - 7 * u, right, y - 7 * u);
+                        else UI.Glyph(g, "sync", RectangleF.Inflate(f.RefreshHit, -8 * u, -8 * u), th.Text);
+                        g.DrawLine(line, card.X + 1, y + hdrH - 0.5f, card.Right - 1, y + hdrH - 0.5f);
+                        y += hdrH;
                     }
-                    else y -= 4 * u;
 
                     for (int i = 0; i < tabIds.Count; i++)
                     {
-                        var r = tabRects[i]; r.Offset(x, y - 2 * u);
-                        f.TabHits.Add(r); f.TabIds.Add(tabIds[i]);
+                        var r = tabRects[i]; r.Offset(x, y);
+                        f.TabHits.Add(RectangleF.FromLTRB(r.X - tabGap / 2, r.Y, r.Right + tabGap / 2, r.Bottom)); f.TabIds.Add(tabIds[i]);
                         bool sel = tabIds[i] == tab;
-                        Draw.Fill(g, r, r.Height / 2, sel ? th.Text : th.Light ? Color.FromArgb(12, 0, 0, 0) : Color.FromArgb(14, 255, 255, 255));
-                        using (var tb = new SolidBrush(sel ? th.Bg : th.Sub))
-                            g.DrawString(tabIds[i] < 0 ? "All" : sources[tabIds[i]].Name, subF, tb, new RectangleF(r.X + 7 * u, r.Y + 1.5f * u, r.Width - 14 * u, r.Height), FmtCenter);
+                        float th2 = tabF.GetHeight(g), ty = r.Y + (tabH - th2) / 2 - u;
+                        float labelW = Math.Max(1, r.Width - (tabCounts[i] == "" ? 0 : 6 * u + tabCountW[i]));
+                        using (var ink = new SolidBrush(sel ? th.Text : th.Sub)) g.DrawString(tabLabels[i], tabF, ink, new RectangleF(r.X, ty, labelW, th2 + 2), FmtTab);
+                        if (tabCounts[i] != "")
+                            using (var ink = new SolidBrush(sel ? accentInk : th.Sub))
+                                g.DrawString(tabCounts[i], tabF, ink, new RectangleF(r.X + Math.Min(tabLabelW[i], labelW) + 6 * u, ty, tabCountW[i] + 2, th2 + 2), FmtTab);
+                        if (sel) Draw.Fill(g, new RectangleF(r.X, r.Bottom - 2 * u, r.Width, 2 * u), u, accent);
                     }
+                    if (tabsH > 0) g.DrawLine(line, card.X + 1, y + tabsH - 0.5f, card.Right - 1, y + tabsH - 0.5f);
                     y += tabsH;
 
-                    var listArea = new RectangleF(card.X, y - 4 * u, card.Width, visibleH + 4 * u);
-                    g.SetClip(listArea);
+                    var listArea = new RectangleF(card.X, y, card.Width, visibleH);
+                    using (var clip = Draw.Round(card, rad)) { g.SetClip(clip); g.SetClip(listArea, CombineMode.Intersect); }
                     if (shown.Count == 0)
                     {
-                        string msg = Busy ? "Loading headlines…" : sources.Count == 0 ? "No feeds yet. Click the gear to add one." : sources.All(s => !s.On) ? "All feeds are switched off." : Errors.Count > 0 ? "Couldn't load your feeds. Check your connection." : "Nothing new.";
-                        g.DrawString(msg, headF, sub, new RectangleF(x, y + 4 * u, right - x, lineH * 2));
+                        string msg = Busy ? "Loading headlines…" : sources.Count == 0 ? "No feeds yet. Click the gear to add one." : sources.All(s => !s.On) ? "All feeds are switched off." : Errors.Count > 0 ? "Couldn't load your feeds. Check your connection." : tab == -2 ? "Nothing saved yet." : "Nothing new.";
+                        g.DrawString(msg, headF, sub, new RectangleF(x, y + 12 * u, right - x, lineH * 2));
                     }
                     float iy = y - scrollIn;
                     var fmtT = c.TwoLines ? FmtTitle2 : FmtTitle1;
-                    var fmtS = FmtSource;
                     for (int i = 0; i < shown.Count; i++)
                     {
                         var s = shown[i];
-                        var row = new RectangleF(x, iy, right - x, heights[i] - 8 * u);
+                        var row = new RectangleF(card.X, iy, card.Width, heights[i]);
                         f.Hits.Add(RectangleF.Intersect(row, listArea));
-                        Draw.Fill(g, row, 12 * u * c.Round / 100f, th.Light ? Color.FromArgb(i == hoverIn ? 24 : 11, 0, 0, 0) : Color.FromArgb(i == hoverIn ? 30 : 13, 255, 255, 255));
+                        if (HasWord(c.HighlightWords, s.Title))
+                            using (var hb = new SolidBrush(Color.FromArgb(th.Light ? 34 : 38, accent))) g.FillRectangle(hb, row);
+                        if (i == hoverIn)
+                            using (var hb = new SolidBrush(th.Light ? Color.FromArgb(14, 0, 0, 0) : Color.FromArgb(16, 255, 255, 255))) g.FillRectangle(hb, row);
 
                         bool isRead = ReadList.Has(s.Link);
-                        var col = s.Src < sources.Count ? sources[s.Src].Color : th.Sub;
-                        float ty = iy + 8 * u, tx = x + 10 * u;
-                        float width = textW - (hasImage(s) ? 100 * u : 0);
+                        var titleFont = isRead ? headF : headB;
+                        float textRight = right - (hasImage(s) ? 100 * u : 0), tx = x + textL, ty = iy + vpad;
+                        float tw = Math.Max(1, textRight - tx - timeW - 8 * u);
+                        float titleH = Math.Min(g.MeasureString(s.Title, titleFont, (int)tw).Height, lineH * (c.TwoLines ? 2 : 1));
+                        if (!isRead) Draw.Fill(g, new RectangleF(x, ty + (lineH - 8 * u) / 2, 8 * u, 8 * u), 4 * u, accent);
+                        g.DrawString(s.Title, titleFont, isRead ? readInk : text, new RectangleF(tx, ty, tw, titleH + 1), fmtT);
+                        g.DrawString(Stamp(s.When), subF, sub, new RectangleF(textRight - timeW, ty + (lineH - subH) / 2, timeW, subH + 2 * u), FmtRight);
                         if (c.ShowSource)
-                        {
-                            string src = s.Src < sources.Count ? sources[s.Src].Name : "";
-                            string ago = Ago(s.When);
-                            float icon = 11 * u;
-                            if (!isRead) Draw.Fill(g, new RectangleF(x + 3.5f * u, ty + (subH - 5 * u) / 2, 5 * u, 5 * u), 2.5f * u, accent);
-                            Draw.Fill(g, new RectangleF(tx, ty + (subH - icon) / 2, icon, icon), icon / 2, isRead ? Color.FromArgb(90, col) : col);
-                            UI.Glyph(g, "rss", new RectangleF(tx + 2 * u, ty + (subH - icon) / 2 + 2 * u, icon - 4 * u, icon - 4 * u), Color.White);
-                            g.DrawString(src + (ago != "" && src != "" ? "  ·  " : "") + ago, subF, isRead ? dim : sub, new RectangleF(tx + icon + 5 * u, ty, width - icon - 5 * u, subH + 2 * u), fmtS);
-                            ty += subH + 5 * u;
-                        }
-                        float titleH = Math.Min(g.MeasureString(s.Title, headF, Math.Max(1, (int)width)).Height, lineH * (c.TwoLines ? 2 : 1));
-                        g.DrawString(s.Title, headF, isRead ? dim : text, new RectangleF(tx, ty, width, titleH + 1), fmtT);
+                            g.DrawString(SourceOf(s, sources), subF, sub, new RectangleF(tx, ty + titleH + 3 * u, Math.Max(1, textRight - tx), subH + 2 * u), FmtSource);
                         if (hasImage(s))
                         {
-                            var imageRect = new RectangleF(right - 100 * u, iy + 8 * u, 90 * u, 60 * u);
+                            var imageRect = new RectangleF(right - 90 * u, ty, 90 * u, 60 * u);
                             var saved = g.Save();
                             using (var path = Draw.Round(imageRect, 10 * u * c.Round / 100f))
                             using (var stream = new MemoryStream(s.Thumbnail))
@@ -1979,6 +2235,7 @@ class FeedsForm : Form
                             }
                             g.Restore(saved);
                         }
+                        if (i < shown.Count - 1) g.DrawLine(line, card.X + 1, row.Bottom - 0.5f, card.Right - 1, row.Bottom - 0.5f);
                         iy += heights[i];
                     }
                     g.ResetClip();
@@ -1989,14 +2246,31 @@ class FeedsForm : Form
                         float fh = 18 * u;
                         Color bg = Color.FromArgb(255 * c.Opacity / 100, th.Bg), clear = Color.FromArgb(0, th.Bg);
                         if (scrollIn > 1)
-                            using (var lg = new LinearGradientBrush(new RectangleF(card.X, y - 4 * u, card.Width, fh + 1), bg, clear, 90f))
-                                g.FillRectangle(lg, card.X + 1, y - 4 * u, card.Width - 2, fh);
+                            using (var lg = new LinearGradientBrush(new RectangleF(card.X, y, card.Width, fh + 1), bg, clear, 90f))
+                                g.FillRectangle(lg, card.X + 1, y, card.Width - 2, fh);
                         if (scrollIn < f.MaxScroll - 1)
                             using (var lg = new LinearGradientBrush(new RectangleF(card.X, y + visibleH - fh, card.Width, fh + 1), clear, bg, 90f))
                                 g.FillRectangle(lg, card.X + 1, y + visibleH - fh, card.Width - 2, fh);
                         float barH = Math.Max(24 * u, visibleH * visibleH / listH);
                         float by = y + (visibleH - barH) * scrollIn / f.MaxScroll;
                         Draw.Fill(g, new RectangleF(card.Right - 6 * u, by, 3 * u, barH), 1.5f * u, th.Light ? Color.FromArgb(50, 0, 0, 0) : Color.FromArgb(50, 255, 255, 255));
+                    }
+                    y += visibleH;
+
+                    if (c.UnreadBadge)
+                    {
+                        g.DrawLine(line, card.X + 1, y + 0.5f, card.Right - 1, y + 0.5f);
+                        bool offline = Errors.Count > 0 && Errors.Count >= sources.Count(s => s.On);
+                        string status = Busy && FetchedAt == DateTime.MinValue ? "Loading…" : offline ? "Offline" : Busy ? "Updating…"
+                            : unread + " unread" + (Errors.Count > 0 ? "  ·  " + Errors.Count + " unavailable" : "");
+                        float sh = tabF.GetHeight(g), fh = footF.GetHeight(g);
+                        using (var ink = new SolidBrush(offline ? th.Sub : accentInk))
+                            g.DrawString(status, tabF, ink, new RectangleF(x, y + (footH - sh) / 2, Math.Max(1, (right - x) * 0.6f), sh + 2), FmtSource);
+                        string open = "Open in App";
+                        float ow = g.MeasureString(open, footF, 9999, FmtTab).Width, ic = 13 * u, ox = right - ow, ix = ox - 6 * u - ic;
+                        g.DrawString(open, footF, sub, new RectangleF(ox, y + (footH - fh) / 2, ow + 2, fh + 2), FmtTab);
+                        UI.Glyph(g, "open", new RectangleF(ix, y + (footH - ic) / 2, ic, ic), th.Sub);
+                        f.OpenHit = RectangleF.FromLTRB(ix - 4 * u, y, card.Right, y + footH);
                     }
                 }
             }
@@ -2017,8 +2291,22 @@ class FeedsForm : Form
         var old = menu.Items.Cast<ToolStripItem>().ToList();
         menu.Items.Clear();
         foreach (var it in old) it.Dispose(); // a cleared submenu that was shown keeps its window otherwise
+        var story = menuStory; menuStory = null; // set by a right-click on a headline; the tray icon's menu has none
+        if (story != null)
+        {
+            bool read = ReadList.Has(story.Link), web = IsWeb(story.Link);
+            if (web) menu.Items.Add(Item("Read here", false, () => OpenReader(story)));
+            if (web) menu.Items.Add(Item("Open in browser", false, () => Open(story)));
+            if (Saved.Has(story.Link)) menu.Items.Add(Item("Remove from saved", false, () => { Saved.Remove(story.Link); Render(); }));
+            else if (web) menu.Items.Add(Item("Save for later", false, () => Save(story)));
+            if (story.Link != null) menu.Items.Add(Item(read ? "Mark as unread" : "Mark as read", false, () => { if (read) ReadList.Remove(story.Link); else ReadList.Add(new[] { story.Link }); Render(); }));
+            if (web) menu.Items.Add(Item("Copy link", false, () => { try { Clipboard.SetText(story.Link); } catch { } }));
+            menu.Items.Add(new ToolStripSeparator());
+        }
         menu.Items.Add(Item("Add a feed…", false, () => OpenSettings("Feeds")));
         menu.Items.Add(Item(Busy ? "Updating…" : "Refresh now", false, FetchAll));
+        var names = c.List;
+        if (tab >= 0 && tab < names.Count) { int src = tab; menu.Items.Add(Item("Mark " + names[src].Name.Replace("&", "&&") + " as read", false, () => MarkFeedRead(src))); }
         menu.Items.Add(Item("Mark all as read", false, MarkAllRead));
         menu.Items.Add(new ToolStripSeparator());
         Common().AddAll(menu.Items);
@@ -2045,6 +2333,90 @@ class FeedsForm : Form
             BackUp = () => { c.Save(); Backup.SaveNow(); },
             Exit = () => { tray.Visible = false; Application.Exit(); },
         };
+    }
+}
+
+// ======================================================================= Reader view
+// An article's text without the page around it, fetched when the window opens. Esc closes it.
+class ReaderForm : Form
+{
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr h, string app, string id);
+
+    readonly Story story;
+    readonly RichTextBox body = new RichTextBox();
+    readonly CancellationTokenSource cancel = new CancellationTokenSource();
+
+    public ReaderForm(FeedsForm app, Story story, string source)
+    {
+        this.story = story;
+        UI.S = DeviceDpi / 96f;
+        Text = "Kinetik Feeds";
+        Icon = app.AppIcon;
+        AutoScaleMode = AutoScaleMode.None;
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = UI.Page; ForeColor = UI.Text; Font = UI.F(13);
+        ClientSize = new Size(UI.I(760), UI.I(820));
+        MinimumSize = new Size(UI.I(480), UI.I(360));
+        KeyPreview = true;
+        KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+
+        var head = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = UI.Page, Padding = new Padding(UI.I(32), UI.I(24), UI.I(32), UI.I(8)) };
+        head.Controls.Add(new Label { Text = story.Title, Font = UI.F(22, FontStyle.Bold), ForeColor = UI.Text, MaximumSize = new Size(ClientSize.Width - UI.I(64), 0), AutoSize = true });
+        head.Controls.Add(new Label { Text = (source + "  ·  " + FeedsForm.Stamp(story.When)).Trim(' ', '·'), Font = UI.F(12.5f), ForeColor = UI.Sub, AutoSize = true, Margin = new Padding(0, UI.I(4), 0, UI.I(12)) });
+        var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, BackColor = UI.Page };
+        var open = UI.Btn("Open in browser", (s, e) => { try { Process.Start(new ProcessStartInfo(story.Link) { UseShellExecute = true }); } catch { } }, true);
+        Button save = null;
+        save = UI.Btn(Saved.Has(story.Link) ? "Saved" : "Save for later", (s, e) => { app.Save(story); save.Text = "Saved"; });
+        open.Margin = new Padding(0, 0, UI.I(8), 0);
+        buttons.Controls.Add(open); buttons.Controls.Add(save);
+        head.Controls.Add(buttons);
+
+        var wrap = new Panel { Dock = DockStyle.Fill, BackColor = UI.Page, Padding = new Padding(UI.I(32), UI.I(8), UI.I(24), UI.I(24)) };
+        body.Dock = DockStyle.Fill; body.BorderStyle = BorderStyle.None; body.BackColor = UI.Page; body.ForeColor = UI.Sub; body.Font = UI.F(15);
+        body.ReadOnly = true; body.DetectUrls = false; body.TabStop = false; body.Text = "Loading…";
+        wrap.Controls.Add(body);
+        Controls.Add(wrap); Controls.Add(head);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        KinetikSuite.Look.Current.Window(Handle); // title bar in the Kinetik apps' theme
+        SetWindowTheme(body.Handle, "DarkMode_Explorer", null);
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        var link = story.Link; var token = cancel.Token;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            List<KeyValuePair<bool, string>> blocks = null; string error = null;
+            try { blocks = Rss.Article(KinetikSuite.Http.Text(link, 4 << 20, "KinetikFeeds/" + Program.Version, token, 20000, "text/html,application/xhtml+xml")); }
+            catch (Exception ex) { error = FeedsForm.Friendly(ex); }
+            try { BeginInvoke((Action)(() => { if (!IsDisposed) ShowText(blocks, error); })); } catch { }
+        });
+    }
+
+    protected override void Dispose(bool disposing) { if (disposing) { cancel.Cancel(); cancel.Dispose(); } base.Dispose(disposing); }
+
+    void ShowText(List<KeyValuePair<bool, string>> blocks, string error)
+    {
+        body.Clear();
+        if (error != null || blocks == null || blocks.Sum(b => b.Value.Length) < 300)
+        {
+            body.Text = error != null ? "Couldn't load the page: " + error : "No article text found on this page. It may need a browser to load. Use Open in browser.";
+            return;
+        }
+        body.ForeColor = UI.Text;
+        foreach (var b in blocks)
+        {
+            body.SelectionStart = body.TextLength; body.SelectionLength = 0;
+            body.SelectionFont = b.Key ? UI.F(18, FontStyle.Bold) : UI.F(15);
+            body.SelectionColor = UI.Text;
+            body.SelectedText = b.Value + "\n\n";
+        }
+        body.Select(0, 0);
     }
 }
 
@@ -2296,10 +2668,47 @@ class SettingsForm : Form
         }
         Buttons(UI.Btn("+  Add feed", (s, e) => AddFeed(), true), UI.Btn(app.Busy ? "Updating…" : "Refresh now", (s, e) => { app.FetchAll(); ShowPage("Feeds"); }));
 
+        Section("Import and export");
+        Buttons(UI.Btn("Import OPML…", (s, e) => ImportOpml()), UI.Btn("Export OPML…", (s, e) => ExportOpml()));
+
         Section("Updating");
-        var mins = new[] { 10, 15, 30, 60, 120, 240 };
-        Choice("sync", "Check every", "Also checked when the PC wakes up", new[] { "10 minutes", "15 minutes", "30 minutes", "1 hour", "2 hours", "4 hours" },
+        var mins = new[] { 5, 10, 15, 30, 60, 120, 240 };
+        Choice("sync", "Check every", "In the background, and when the PC wakes up. The tray icon shows the unread count", new[] { "5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour", "2 hours", "4 hours" },
             Math.Max(0, Array.IndexOf(mins, c.RefreshMin)), i => c.RefreshMin = mins[i]);
+    }
+
+    void ImportOpml()
+    {
+        using (var d = new OpenFileDialog { Title = "Import feeds", Filter = "OPML files (*.opml;*.xml)|*.opml;*.xml|All files|*.*" })
+        {
+            if (d.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                if (new FileInfo(d.FileName).Length > 4 << 20) throw new IOException("that file is too large to be a feed list");
+                var found = Opml.Read(File.ReadAllText(d.FileName));
+                var list = c.List; int added = 0;
+                foreach (var f in found)
+                {
+                    if (list.Count >= 100 || list.Any(x => x.Url.TrimEnd('/').Equals(f.Url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))) continue;
+                    f.Color = Rss.Palette[list.Count % Rss.Palette.Length]; list.Add(f); added++;
+                }
+                MessageBox.Show(this, added + " feed" + (added == 1 ? "" : "s") + " added" + (found.Count > added ? ". " + (found.Count - added) + " skipped: already there, or past the limit of 100 feeds." : "."),
+                    "Import feeds", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (added > 0) { c.List = list; app.FeedsChanged(); ShowPage("Feeds"); }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Couldn't read that file: " + (ex is XmlException ? "it isn't a valid OPML file." : ex.Message), "Import feeds", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+    }
+
+    void ExportOpml()
+    {
+        using (var d = new SaveFileDialog { Title = "Export feeds", Filter = "OPML file (*.opml)|*.opml", FileName = "KinetikFeeds.opml" })
+            if (d.ShowDialog(this) == DialogResult.OK)
+                try { Opml.Write(d.FileName, c.List); }
+                catch (Exception ex) { MessageBox.Show(this, "Couldn't save the file: " + ex.Message, "Export feeds", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
     void AddFeed()
@@ -2329,7 +2738,7 @@ class SettingsForm : Form
     // ---- Headlines
     void BuildHeadlines()
     {
-        Desc("Headlines from every feed are merged into one list, newest first. Click one to open it in your browser; it then dims so you can see what you've read.");
+        Desc("Headlines from every feed are merged into one list, newest first. Click one to open it in your browser; it then dims so you can see what you've read. Right-click one to read it here, save it for later or mark it read.");
         Section("List");
         Slide("list", "Headlines to show", null, 3, 60, c.MaxItems, null, v => c.MaxItems = v);
         var ages = new[] { 0, 1, 2, 3, 7, 14 };
@@ -2337,14 +2746,25 @@ class SettingsForm : Form
         Switch("eye", "Hide headlines I've read", "Otherwise they stay, dimmed", c.HideRead, v => c.HideRead = v);
         Section("Each headline");
         Switch("text", "Two-line titles", "Long titles wrap onto a second line", c.TwoLines, v => c.TwoLines = v);
-        Switch("marker", "Source and time", "\"BBC News · 25m\" under the title", c.ShowSource, v => c.ShowSource = v);
-        Section("Header");
-        Switch("layout", "Show header", "Title, unread count, refresh and settings buttons", c.ShowHeader, v => c.ShowHeader = v);
+        Switch("marker", "Feed name", "The feed's name under the title", c.ShowSource, v => c.ShowSource = v);
+        Section("Header and footer");
+        Switch("layout", "Show header", "Icon, title, refresh and settings buttons", c.ShowHeader, v => c.ShowHeader = v);
         var tb = new TextBox { Text = c.Title };
         tb.TextChanged += (s, e) => { c.Title = tb.Text; Changed(); };
-        Row("text", "Title", "Shown at the top of the card", UI.TextField(tb, UI.I(210)));
-        Switch("bolt", "Unread count", "A small \"5 new\" badge next to the title", c.UnreadBadge, v => c.UnreadBadge = v);
+        Row("text", "Title", "Shown at the top of the card, in capitals", UI.TextField(tb, UI.I(210)));
+        Switch("bolt", "Show footer", "The unread count and the Open in App link", c.UnreadBadge, v => c.UnreadBadge = v);
         Buttons(UI.Btn("Mark all as read", (s, e) => { app.MarkAllRead(); Changed(); }), UI.Btn("Mark all as unread", (s, e) => { ReadList.Clear(); Changed(); }));
+
+        Section("Keyword filters");
+        var mute = new TextBox { Text = c.MuteWords };
+        mute.TextChanged += (s, e) => { c.MuteWords = mute.Text; Changed(); };
+        Row("eye", "Mute", "Hide headlines with any of these words in the title. Separate words with commas", UI.TextField(mute, UI.I(210)));
+        var highlight = new TextBox { Text = c.HighlightWords };
+        highlight.TextChanged += (s, e) => { c.HighlightWords = highlight.Text; Changed(); };
+        Row("bolt", "Highlight", "Tint headlines with any of these words in the title", UI.TextField(highlight, UI.I(210)));
+
+        Section("Saved for later");
+        Switch("folder", "Add saved links to Notes", ReadLater.NotesFolder() != null ? "Adds a task to \"" + ReadLater.NoteName + "\" in your Notes folder" : "Kinetik Notes' folder isn't set yet, so saved links stay in Feeds only", c.SaveToNotes, v => c.SaveToNotes = v);
     }
 
     // ---- Look

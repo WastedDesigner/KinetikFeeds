@@ -81,6 +81,7 @@ static class FeedsLayoutTests
         var cfg = DemoData.Settings(); cfg.Shadow = false; cfg.Title = "Technology and science headlines from around the world";
         Set(app, "Cfg", cfg);
         Set(app, "Errors", new Dictionary<int, string>());
+        Set(app, "tab", -1); // an instance made without its constructor starts on tab 0
         var stories = cfg.List.SelectMany((s, i) => DemoData.Stories(s.Url, i)).OrderByDescending(s => s.When).ToList();
         stories[0].Thumbnail = Thumbnail();
         Set(app, "stories", stories);
@@ -108,6 +109,46 @@ static class FeedsLayoutTests
             using (scrolled.Bmp) Check(scrolled.Hits.Last().Height > 0, "Last story is reachable by scrolling");
             count++;
         }
+        // unread counts, muted words, the Saved tab
+        Set(app, "stories", stories);
+        var all = app.Compose(1, 1, 0, -1, 800, (w, h) => new Bitmap(w, h));
+        using (all.Bmp) Check(all.Unread == stories.Count, "Unread total counts every headline, not just the rows on show");
+        cfg.MuteWords = "TIDES, nothing-matches"; cfg.HighlightWords = "laptop";
+        var muted = app.Compose(1, 1, 0, -1, 800, (w, h) => new Bitmap(w, h));
+        using (muted.Bmp) Check(muted.Unread == stories.Count - 1 && !app.Visible().Any(x => x.Title.Contains("king tides")), "Muted words hide a headline and its unread count");
+        Check(FeedsForm.HasWord("a, b ;c", "the B side") && !FeedsForm.HasWord("", "anything") && !FeedsForm.HasWord(" , ", "anything"), "Word lists ignore case and empty entries");
+        cfg.MuteWords = cfg.HighlightWords = "";
+        Saved.Add(stories[0], "Test feed");
+        Saved.Add(stories[0], "Test feed");
+        Check(Saved.Has(stories[0].Link), "Saved headline is remembered");
+        Set(app, "tab", -2);
+        var savedTab = app.Compose(1, 1, 0, -1, 800, (w, h) => new Bitmap(w, h));
+        using (savedTab.Bmp) Check(savedTab.TabIds.Contains(-2) && savedTab.Hits.Count == Saved.Items.Count, "Saved tab lists the saved headlines");
+        Saved.Items.Clear(); Set(app, "tab", -1);
+
+        // OPML, reader view and the Notes hand-off
+        var scratch = Path.Combine(Path.GetTempPath(), "feeds-test-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(scratch);
+        try
+        {
+            var opmlFile = Path.Combine(scratch, "feeds.opml");
+            Opml.Write(opmlFile, new[] { new Source { Name = "A & B", Url = "https://example.com/a.xml" }, new Source { Name = "C", Url = "https://example.com/c.xml" } });
+            var back = Opml.Read(File.ReadAllText(opmlFile));
+            Check(back.Count == 2 && back[0].Name == "A & B" && back[1].Url == "https://example.com/c.xml", "OPML round trip");
+            var nested = Opml.Read("<opml><body><outline text='Cat'><outline text='X' xmlUrl='https://x.test/f'/><outline text='bad' xmlUrl='file:///c:/secret'/></outline></body></opml>");
+            Check(nested.Count == 1 && nested[0].Name == "X", "OPML reads nested outlines and skips non-web links");
+
+            var article = Rss.Article("<html><body><nav><p>Menu paragraph that is long enough to be kept if nav were not removed.</p></nav>"
+                + "<article><h2>Heading</h2><p>First paragraph of the story, long enough to count as real text.</p><p>Second paragraph, also long enough to count as real text &amp; entities.</p>"
+                + "<p>Short.</p><script>var x = '<p>script paragraph that is long enough to be counted as text</p>';</script></article></body></html>");
+            Check(article.Count == 3 && article[0].Key && article[0].Value == "Heading" && article[2].Value.Contains("& entities"), "Reader view keeps headings and paragraphs, drops menus, scripts and fragments");
+
+            ReadLater.ToNotes(scratch, "Story [one]", "https://example.com/a b", "Feed");
+            ReadLater.ToNotes(scratch, "Story [one]", "https://example.com/a b", "Feed");
+            ReadLater.ToNotes(scratch, "Story two", "https://example.com/two", "");
+            var note = File.ReadAllLines(Path.Combine(scratch, ReadLater.NoteName));
+            Check(note.Length == 4 && note[0] == "# Read later" && note[2].StartsWith("- [ ] [Story (one)](https://example.com/a%20b)") && note[3].StartsWith("- [ ] [Story two]"), "Notes line is added once, as a task");
+        }
+        finally { try { Directory.Delete(scratch, true); } catch { } }
         Set(app, "stories", new List<Story>());
         var empty = app.Compose(1, 1, 0, -1, 800, (w, h) => new Bitmap(w, h));
         using (empty.Bmp) Check(empty.Hits.Count == 0, "Empty feed has no story targets");
