@@ -55,17 +55,17 @@ Settings are kept in `HKCU\Software\KinetikFeeds`. Network requests go to the fe
 
 ## Requirements
 
-Windows 10 or 11 (64-bit) with .NET Framework 4.8, which ships with both.
+Windows 10 or 11 (64-bit) with the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (x64).
 
 ## Building from source
 
-No SDK needed: `build.bat` compiles `KinetikFeeds.cs` with the .NET Framework compiler that ships with Windows. `build.bat package` also makes `KinetikFeeds.zip` for a release.
+Needs the .NET 8 SDK: `dotnet publish -c Release -p:PublishSingleFile=true -p:DebugType=none -o .` writes `KinetikFeeds.exe` in this folder.
 
 `KinetikFeeds.exe --demo` runs a separate copy with made-up feeds and headlines (nothing is fetched) that reads and saves no settings, which is how the screenshots were made. Add `--theme Light` (or any theme name) to pick its theme.
 
 ## Tests and packaging
 
-`python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+`python tests/run-tests.py` runs the regression checks (no window opens). `powershell -File package.ps1 -App KinetikFeeds` (after the publish above) makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
 
 For the feed image and layout checks on Windows, compile `tests\FeedsLayoutTests.cs` alongside the app with `/target:exe /main:FeedsLayoutTests` and the same references as `build.bat`. Run that test executable with an optional output directory to save sample renders.
 
